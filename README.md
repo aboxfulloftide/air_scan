@@ -129,7 +129,7 @@ sudo pip3 install mysql-connector-python --break-system-packages
 Run once on the MySQL server (or from the Pi):
 
 ```bash
-mysql -h 192.168.1.42 -u networkscan -pREDACTED --skip-ssl wireless < setup_db.sql
+mysql -h 192.168.1.42 -u networkscan -p --skip-ssl wireless < setup_db.sql
 ```
 
 > Note: `--skip-ssl` is required if the MySQL server uses a self-signed certificate.
