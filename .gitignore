@@ -1,0 +1,10 @@
+# Credentials — never commit
+.env
+
+# Local data buffer
+offline_buffer.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
