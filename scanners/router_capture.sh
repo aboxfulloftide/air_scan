@@ -18,7 +18,7 @@ SCAN_DIR="/tmp/scans"
 SCAN_INTERVAL=30      # seconds between iw scan cycles
 CAPTURE_ROTATE=60     # seconds per tcpdump pcap rotation
 HOP_INTERVAL=10       # seconds between channel hops
-MAX_FILES=30
+MAX_FILES=200
 
 # Channels to hop on the monitor interface
 FREQS_24="2412 2437 2462"

@@ -1,5 +1,6 @@
 # Credentials — never commit
 .env
+claude.sh
 
 # Local data buffer
 offline_buffer.jsonl

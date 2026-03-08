@@ -20,6 +20,18 @@ import time
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Load .env from project root
+_env_file = Path(__file__).resolve().parent.parent / ".env"
+if _env_file.exists():
+    with open(_env_file) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                val = val.strip().strip('"').strip("'")
+                os.environ.setdefault(key.strip(), val)
 
 import mysql.connector
 from scapy.all import sniff, Dot11, Dot11Beacon, Dot11ProbeReq, Dot11Elt, RadioTap, conf
@@ -171,6 +183,18 @@ def get_freq_and_flags(pkt):
     except: pass
     return freq, flags
 
+def freq_to_channel(freq):
+    if not freq:
+        return None
+    freq = int(freq)
+    if 2412 <= freq <= 2484:
+        return 14 if freq == 2484 else (freq - 2407) // 5
+    elif 5180 <= freq <= 5825:
+        return (freq - 5000) // 5
+    elif 5955 <= freq <= 7115:
+        return (freq - 5950) // 5
+    return None
+
 def get_channel(pkt):
     elt = pkt[Dot11Elt] if pkt.haslayer(Dot11Elt) else None
     while elt and isinstance(elt, Dot11Elt):
@@ -235,6 +259,9 @@ def handle_packet(pkt):
 
     if not mac or mac == "ff:ff:ff:ff:ff:ff":
         return
+
+    if channel is None:
+        channel = freq_to_channel(freq)
 
     oui        = get_oui(mac)
     randomized = mac_is_randomized(mac)

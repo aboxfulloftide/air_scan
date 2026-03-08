@@ -22,6 +22,18 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Load .env from project root
+_env_file = Path(__file__).resolve().parent.parent / ".env"
+if _env_file.exists():
+    with open(_env_file) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                val = val.strip().strip('"').strip("'")
+                os.environ.setdefault(key.strip(), val)
 
 import mysql.connector
 from scapy.all import (
@@ -94,6 +106,19 @@ def get_manufacturer(mac):
         return m if m else None
     except: return None
 
+def freq_to_flags(freq):
+    """Derive channel flags from frequency when RadioTap doesn't provide them."""
+    if not freq:
+        return None
+    freq = int(freq)
+    if 2412 <= freq <= 2484:
+        return "CCK+2GHz"
+    elif 5000 <= freq <= 5900:
+        return "OFDM+5GHz"
+    elif 5900 < freq <= 7300:
+        return "OFDM+6GHz"
+    return None
+
 def freq_to_channel(freq):
     """Convert frequency MHz to channel number."""
     if not freq:
@@ -146,7 +171,7 @@ def parse_scan_files(file_contents_list):
                 "signal": float(r.get("signal", 0)) if r.get("signal") else None,
                 "channel": freq_to_channel(freq),
                 "freq_mhz": freq,
-                "channel_flags": None,
+                "channel_flags": freq_to_flags(freq),
                 "ts": ts,
                 "ssids": {r["ssid"]} if r.get("ssid") else set(),
                 "ht": bool(r.get("ht", False)),
@@ -229,7 +254,7 @@ def parse_pcap_file(filepath):
             "interface": "wlan2mon",
             "host": SCANNER_HOST_LABEL,
             "signal": sig, "channel": channel,
-            "freq_mhz": freq, "channel_flags": flags,
+            "freq_mhz": freq, "channel_flags": flags or freq_to_flags(freq),
             "ts": ts, "ssids": {ssid} if ssid else set(),
             "ht": ht, "vht": vht, "he": he,
             "vendor_ouis": vendor_ouis,
@@ -241,23 +266,42 @@ def parse_pcap_file(filepath):
     return observations
 
 
+SLOT_SECONDS = 10
+
+def align_ts(ts):
+    """Floor a naive-UTC datetime to the nearest 10-second boundary."""
+    epoch = int(ts.replace(tzinfo=timezone.utc).timestamp())
+    aligned = epoch - (epoch % SLOT_SECONDS)
+    return datetime.fromtimestamp(aligned, tz=timezone.utc).replace(tzinfo=None)
+
+
 def dedup_observations(observations):
-    """Keep only the latest observation per MAC, merging SSIDs/caps."""
+    """Keep one observation per MAC per 10s slot, merging SSIDs/caps.
+
+    Aligns all timestamps to 10-second boundaries so observations can be
+    compared across scanners (matches wifi_scanner.py snapshot behavior).
+    """
+    # Key: (mac, aligned_ts)
     best = {}
     for obs in observations:
         mac = obs["mac"]
-        if mac not in best or obs["ts"] > best[mac]["ts"]:
-            if mac in best:
-                obs["ssids"] = obs["ssids"] | best[mac]["ssids"]
-                obs["ht"]  = obs["ht"]  or best[mac]["ht"]
-                obs["vht"] = obs["vht"] or best[mac]["vht"]
-                obs["he"]  = obs["he"]  or best[mac]["he"]
-            best[mac] = obs
+        slot_ts = align_ts(obs["ts"])
+        key = (mac, slot_ts)
+
+        if key not in best:
+            obs["ts"] = slot_ts
+            best[key] = obs
         else:
-            best[mac]["ssids"] |= obs["ssids"]
-            if obs["ht"]:  best[mac]["ht"]  = True
-            if obs["vht"]: best[mac]["vht"] = True
-            if obs["he"]:  best[mac]["he"]  = True
+            existing = best[key]
+            # Keep the most recent signal reading within the slot
+            if obs["ts"] > existing["ts"]:
+                existing["signal"] = obs["signal"]
+            existing["ssids"] |= obs["ssids"]
+            existing["vendor_ouis"] |= obs.get("vendor_ouis", set())
+            if obs["ht"]:  existing["ht"]  = True
+            if obs["vht"]: existing["vht"] = True
+            if obs["he"]:  existing["he"]  = True
+
     return list(best.values())
 
 
