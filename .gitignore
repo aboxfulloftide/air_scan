@@ -3,8 +3,14 @@
 
 # Local data buffer
 offline_buffer.jsonl
+*_offline_buffer.jsonl
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
+
+# Node / web
+node_modules/
+dist/
+.next/
