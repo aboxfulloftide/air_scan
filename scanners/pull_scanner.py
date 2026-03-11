@@ -306,6 +306,23 @@ def dedup_observations(observations):
 
 
 # ---------------------------------------------------------------------------
+# Scanner self-registration & heartbeat
+# ---------------------------------------------------------------------------
+
+def register_scanner(conn, cur, hostname):
+    """Register a scanner in the scanners table (upsert) and update heartbeat."""
+    ts = datetime.now(timezone.utc).replace(tzinfo=None)
+    cur.execute("""
+        INSERT INTO scanners (hostname, is_active, last_heartbeat)
+        VALUES (%s, TRUE, %s)
+        ON DUPLICATE KEY UPDATE
+            is_active = TRUE,
+            last_heartbeat = VALUES(last_heartbeat)
+    """, (hostname, ts))
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # DB flush (same schema as wifi_scanner.py)
 # ---------------------------------------------------------------------------
 
@@ -371,6 +388,9 @@ def flush_to_db(observations):
     try:
         conn = mysql.connector.connect(**DB)
         cur  = conn.cursor()
+
+        # Update scanner heartbeat for the router
+        register_scanner(conn, cur, SCANNER_HOST_LABEL)
 
         device_rows = {}
         for obs in batch:

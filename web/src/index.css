@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Leaflet overrides for dark theme */
+.leaflet-container {
+  background: #1a1a2e;
+}
+.leaflet-control-zoom a {
+  background: #1f2937 !important;
+  color: #d1d5db !important;
+  border-color: #374151 !important;
+}
+.leaflet-control-zoom a:hover {
+  background: #374151 !important;
+}
+.leaflet-popup-content-wrapper {
+  background: #1f2937;
+  color: #d1d5db;
+  border-radius: 0.5rem;
+}
+.leaflet-popup-tip {
+  background: #1f2937;
+}
+.leaflet-popup-close-button {
+  color: #9ca3af !important;
+}

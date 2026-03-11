@@ -1,0 +1,11 @@
+# office-pi5 — primary WiFi scanner
+HOST=office-pi5
+USER=matheau
+REMOTE_PATH=/home/matheau/code/air_scan/scanners/
+SCP_FLAGS=""
+AUTH=key
+
+SERVICE_TYPE=systemd
+SERVICE_NAME=wifi-scanner
+
+FILES=(wifi_scanner.py)

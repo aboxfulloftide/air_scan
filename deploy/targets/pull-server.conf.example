@@ -1,0 +1,11 @@
+# pull-server — pulls scan data from OpenWrt router
+HOST=pull-server
+USER=matheau
+REMOTE_PATH=/home/matheau/code/air_scan/scanners/
+SCP_FLAGS=""
+AUTH=key
+
+SERVICE_TYPE=systemd
+SERVICE_NAME=pull-scanner
+
+FILES=(pull_scanner.py sync_known_devices.py)

@@ -1,0 +1,9 @@
+# Scanners
+scapy>=2.5.0
+mysql-connector-python>=8.0
+
+# Web API
+fastapi>=0.128.0
+uvicorn>=0.30.0
+sqlalchemy>=2.0.0
+aiomysql>=0.3.0

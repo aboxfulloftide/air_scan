@@ -1,6 +1,7 @@
 # Credentials — never commit
 .env
 claude.sh
+deploy/.secrets
 
 # Local data buffer
 offline_buffer.jsonl
@@ -15,3 +16,4 @@ __pycache__/
 node_modules/
 dist/
 .next/
+static/

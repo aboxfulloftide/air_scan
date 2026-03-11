@@ -360,6 +360,22 @@ def snapshot_thread():
 
 
 # ---------------------------------------------------------------------------
+# Scanner self-registration & heartbeat
+# ---------------------------------------------------------------------------
+
+def register_scanner(conn, cur):
+    """Register this scanner in the scanners table (upsert) and update heartbeat."""
+    cur.execute("""
+        INSERT INTO scanners (hostname, is_active, last_heartbeat)
+        VALUES (%s, TRUE, %s)
+        ON DUPLICATE KEY UPDATE
+            is_active = TRUE,
+            last_heartbeat = VALUES(last_heartbeat)
+    """, (HOSTNAME, now_utc()))
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # DB flush thread
 # ---------------------------------------------------------------------------
 
@@ -439,8 +455,6 @@ def flush_to_db():
         buffered = read_and_clear_buffer()
 
         with lock:
-            if not pending_observations and not buffered:
-                continue
             batch = buffered + pending_observations.copy()
             pending_observations.clear()
 
@@ -448,6 +462,14 @@ def flush_to_db():
             conn   = mysql.connector.connect(**DB)
             cur    = conn.cursor()
             ts_now = now_utc()
+
+            # Always update heartbeat so scanner shows online even with no traffic
+            register_scanner(conn, cur)
+
+            if not batch:
+                conn.commit()
+                conn.close()
+                continue
 
             device_rows = {}
             for obs in batch:
