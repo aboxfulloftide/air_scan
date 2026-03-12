@@ -4,10 +4,17 @@
 # Usage: ./router_ctl.sh {start|stop|status|deploy|logs}
 # ---------------------------------------------------------------------------
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Load .env from repo root if ROUTER_PASS not already set
+if [ -z "$ROUTER_PASS" ] && [ -f "${SCRIPT_DIR}/../.env" ]; then
+    # shellcheck disable=SC1091
+    set -a; . "${SCRIPT_DIR}/../.env"; set +a
+fi
+
 ROUTER_HOST="192.168.1.3"
 ROUTER_USER="root"
-ROUTER_PASS="${ROUTER_PASS:-REDACTED}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROUTER_PASS="${ROUTER_PASS:?ROUTER_PASS is not set — add it to .env or export it}"
 
 ssh_cmd() {
     sshpass -p "$ROUTER_PASS" ssh -o StrictHostKeyChecking=no "${ROUTER_USER}@${ROUTER_HOST}" "$1" 2>&1
