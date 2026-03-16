@@ -25,3 +25,30 @@
 .leaflet-popup-close-button {
   color: #9ca3af !important;
 }
+@keyframes pulse-ring {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.5); opacity: 0.5; }
+}
+/* Device label tooltips on map */
+.device-tooltip {
+  background: rgba(0, 0, 0, 0.8) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 4px !important;
+  color: #e5e7eb !important;
+  font-size: 11px !important;
+  padding: 2px 6px !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5) !important;
+  white-space: nowrap !important;
+}
+.device-tooltip::before {
+  border-right-color: rgba(0, 0, 0, 0.8) !important;
+}
+/* Leaflet layer control dark theme */
+.leaflet-control-layers {
+  background: #1f2937 !important;
+  border-color: #374151 !important;
+  color: #d1d5db !important;
+}
+.leaflet-control-layers-selector + span {
+  color: #d1d5db !important;
+}

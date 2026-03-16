@@ -15,7 +15,14 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
 
 @router.patch("/settings")
 async def update_settings(body: dict, db: AsyncSession = Depends(get_db)):
-    allowed = {"observation_retention_days"}
+    allowed = {
+        "observation_retention_days",
+        "triangulation_tx_power",
+        "triangulation_path_loss_n",
+        "triangulation_interval_seconds",
+        "triangulation_window_seconds",
+        "position_retention_days",
+    }
     for key, value in body.items():
         if key not in allowed:
             continue

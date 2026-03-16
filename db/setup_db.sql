@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS observations (
     INDEX idx_mac (mac),
     INDEX idx_recorded_at (recorded_at),
     INDEX idx_scanner_host (scanner_host),
+    INDEX idx_observations_recorded_signal (recorded_at, signal_dbm, mac, scanner_host),
     FOREIGN KEY (mac) REFERENCES devices(mac) ON UPDATE CASCADE
 );
 
@@ -64,6 +65,8 @@ CREATE TABLE IF NOT EXISTS scanners (
     x_pos           DECIMAL(12,8),
     y_pos           DECIMAL(12,8),
     z_pos           DECIMAL(12,8) DEFAULT 0,
+    rssi_offset     DECIMAL(5,2) DEFAULT 0 COMMENT 'Auto-computed RSSI correction (dB)',
+    calibration_samples SMALLINT DEFAULT 0 COMMENT 'Number of fixed devices used for calibration',
     floor           TINYINT DEFAULT 0,
     is_active       BOOLEAN DEFAULT TRUE,
     last_heartbeat  DATETIME,
@@ -112,7 +115,8 @@ CREATE TABLE IF NOT EXISTS device_positions (
     scanner_count   TINYINT,
     computed_at     DATETIME NOT NULL,
     INDEX idx_mac (mac),
-    INDEX idx_computed_at (computed_at)
+    INDEX idx_computed_at (computed_at),
+    INDEX idx_device_positions_mac_computed (mac, computed_at)
 );
 
 -- -----------------------------------------------------------------------
@@ -125,8 +129,20 @@ CREATE TABLE IF NOT EXISTS known_devices (
     label           VARCHAR(128),
     owner           VARCHAR(128),
     status          ENUM('known', 'unknown', 'guest', 'rogue') DEFAULT 'unknown',
-    synced_at       DATETIME
+    synced_at       DATETIME,
+    is_fixed        BOOLEAN DEFAULT FALSE,
+    fixed_x         DECIMAL(12,8),
+    fixed_y         DECIMAL(12,8),
+    fixed_z         DECIMAL(12,8),
+    fixed_floor     TINYINT DEFAULT 0
 );
+
+CREATE INDEX idx_known_devices_status ON known_devices (status);
+CREATE INDEX idx_known_devices_port_scan_host_id ON known_devices (port_scan_host_id);
+CREATE INDEX idx_known_devices_port_scan_host_id_synced_at ON known_devices (port_scan_host_id, synced_at);
+CREATE INDEX idx_known_devices_label ON known_devices (label);
+CREATE INDEX idx_known_devices_owner ON known_devices (owner);
+CREATE INDEX idx_devices_device_type_last_seen ON devices (device_type, last_seen);
 
 
 -- -----------------------------------------------------------------------
@@ -140,4 +156,10 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 INSERT IGNORE INTO settings (key_name, value) VALUES
-  ('observation_retention_days', '3');
+  ('observation_retention_days', '3'),
+  ('triangulation_tx_power', '-40'),
+  ('triangulation_path_loss_n', '2.7'),
+  ('triangulation_interval_seconds', '30'),
+  ('triangulation_window_seconds', '120'),
+  ('triangulation_rssi_correction', 'true'),
+  ('position_retention_days', '1');

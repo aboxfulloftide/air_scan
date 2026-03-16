@@ -154,7 +154,12 @@ CREATE TABLE IF NOT EXISTS known_devices (
     label           VARCHAR(128),
     owner           VARCHAR(128),
     status          ENUM('known', 'unknown', 'guest', 'rogue') DEFAULT 'unknown',
-    synced_at       DATETIME
+    synced_at       DATETIME,
+    is_fixed        BOOLEAN DEFAULT FALSE,
+    fixed_x         DECIMAL(12,8),
+    fixed_y         DECIMAL(12,8),
+    fixed_z         DECIMAL(12,8),
+    fixed_floor     TINYINT DEFAULT 0
 );
 
 -- -----------------------------------------------------------------------

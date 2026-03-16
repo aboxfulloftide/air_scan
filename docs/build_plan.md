@@ -66,8 +66,30 @@ New module `triangulation.py`:
 ### 2c. Position Storage
 New table `device_positions`:
 - `mac`, `x`, `y`, `floor`, `confidence`, `scanner_count`, `method`, `computed_at`
-- Methods: `trilateration`, `single_scanner`, `gps`
+- Methods: `trilateration`, `single_scanner`, `gps`, `fixed`
 - Retains history for movement tracking
+
+### 2d. Fixed-Position Devices (static anchors)
+Devices like Rokus, smart TVs, and printers are always in the same physical spot.
+These can be manually pinned on the map and serve dual purpose:
+
+**Map placement**: Their dot always renders at the pinned location regardless of
+RSSI-computed position.
+
+**Triangulation calibration**: Since the true position is known, observed RSSI
+readings from each scanner can be used to tune the path-loss exponent `n` per
+scanner pair. A fixed device with strong consistent signal = a free calibration
+beacon.
+
+Schema additions to `known_devices`:
+- `is_fixed` BOOLEAN — device has a manually set position
+- `fixed_x`, `fixed_y` DECIMAL — map coordinates (same coordinate space as scanners)
+- `fixed_floor` TINYINT — floor number
+
+When `is_fixed = TRUE`, `device_positions` rows for that MAC use `method = 'fixed'`
+and always write the pinned coordinates. The triangulation engine skips computing
+a new position for fixed devices but can still use their observations as calibration
+data.
 
 ---
 
@@ -146,9 +168,11 @@ are targeted. Placeholder for when requirements become clearer.
 |----------|-------|------|-----|
 | 1 | 1 | Scanner registry + schema cleanup | Foundation for everything spatial |
 | 2 | 4a | Port scan MAC linking | Quick win — known vs unknown |
-| 3 | 3a | API for mobile upload | Enables GPS data collection |
-| 4 | 2 | Triangulation engine | Needs scanner positions + data |
-| 5 | 5 | Web UI map view | Visual payoff |
+| 3 | 4b | Device classification UI | Needed to pin fixed-position devices |
+| 4 | 2d | Fixed-position device anchors | Pin Rokus/TVs/printers on map; calibration data for triangulation |
+| 5 | 3a | API for mobile upload | Enables GPS data collection |
+| 6 | 2a-c | Triangulation engine | Needs scanner positions + fixed anchors for calibration |
+| 7 | 5 | Web UI map view | Visual payoff |
 
 ---
 
@@ -200,7 +224,7 @@ CREATE TABLE device_positions (
     y_pos           DECIMAL(10,4),
     floor           TINYINT,
     confidence      DECIMAL(5,2),
-    method          ENUM('trilateration','single_scanner','gps'),
+    method          ENUM('trilateration','single_scanner','gps','fixed'),
     scanner_count   TINYINT,
     computed_at     DATETIME NOT NULL,
     INDEX idx_mac (mac),
@@ -214,6 +238,11 @@ CREATE TABLE known_devices (
     label           VARCHAR(128),
     owner           VARCHAR(128),
     status          ENUM('known','unknown','guest','rogue') DEFAULT 'unknown',
-    synced_at       DATETIME
+    synced_at       DATETIME,
+    -- Phase 2d: fixed-position anchor support
+    is_fixed        BOOLEAN DEFAULT FALSE,
+    fixed_x         DECIMAL(10,4),
+    fixed_y         DECIMAL(10,4),
+    fixed_floor     TINYINT DEFAULT 0
 );
 ```

@@ -140,17 +140,50 @@ def sync():
         status = "known" if in_wireless else "unknown"
 
         w_cur.execute("""
-            INSERT INTO known_devices (mac, port_scan_host_id, label, status, synced_at)
-            VALUES (%s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                port_scan_host_id = VALUES(port_scan_host_id),
-                label = VALUES(label),
-                status = CASE
-                    WHEN status IN ('guest', 'rogue') THEN status
-                    ELSE VALUES(status)
-                END,
-                synced_at = VALUES(synced_at)
-        """, (mac, host_id, hostname, status, ts))
+            SELECT is_fixed, fixed_x, fixed_y, fixed_z, fixed_floor
+            FROM known_devices
+            WHERE port_scan_host_id = %s AND is_fixed = TRUE
+            LIMIT 1
+        """, (host_id,))
+        fixed_anchor = w_cur.fetchone()
+
+        if fixed_anchor:
+            w_cur.execute("""
+                INSERT INTO known_devices (
+                    mac, port_scan_host_id, label, status, synced_at,
+                    is_fixed, fixed_x, fixed_y, fixed_z, fixed_floor
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    port_scan_host_id = VALUES(port_scan_host_id),
+                    label = VALUES(label),
+                    status = CASE
+                        WHEN status IN ('guest', 'rogue') THEN status
+                        ELSE VALUES(status)
+                    END,
+                    is_fixed = VALUES(is_fixed),
+                    fixed_x = VALUES(fixed_x),
+                    fixed_y = VALUES(fixed_y),
+                    fixed_z = VALUES(fixed_z),
+                    fixed_floor = VALUES(fixed_floor),
+                    synced_at = VALUES(synced_at)
+            """, (
+                mac, host_id, hostname, status, ts,
+                fixed_anchor["is_fixed"], fixed_anchor["fixed_x"], fixed_anchor["fixed_y"], fixed_anchor["fixed_z"], fixed_anchor["fixed_floor"],
+            ))
+        else:
+            w_cur.execute("""
+                INSERT INTO known_devices (mac, port_scan_host_id, label, status, synced_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    port_scan_host_id = VALUES(port_scan_host_id),
+                    label = VALUES(label),
+                    status = CASE
+                        WHEN status IN ('guest', 'rogue') THEN status
+                        ELSE VALUES(status)
+                    END,
+                    synced_at = VALUES(synced_at)
+            """, (mac, host_id, hostname, status, ts))
 
         if in_wireless:
             matched += 1

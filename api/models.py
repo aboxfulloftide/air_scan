@@ -92,9 +92,13 @@ class DevicePosition(Base):
     mac: Mapped[str] = mapped_column(String(17), nullable=False)
     x_pos: Mapped[Optional[float]] = mapped_column(DECIMAL(12, 8), nullable=True)
     y_pos: Mapped[Optional[float]] = mapped_column(DECIMAL(12, 8), nullable=True)
+    z_pos: Mapped[Optional[float]] = mapped_column(DECIMAL(12, 8), nullable=True)
     floor: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
     confidence: Mapped[Optional[float]] = mapped_column(DECIMAL(5, 2), nullable=True)
-    method: Mapped[Optional[str]] = mapped_column(Enum("trilateration", "single_scanner", "gps", "manual"), nullable=True)
+    method: Mapped[Optional[str]] = mapped_column(
+        Enum("trilateration", "single_scanner", "gps", "manual", "fixed"),
+        nullable=True,
+    )
     scanner_count: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
     computed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
@@ -108,3 +112,8 @@ class KnownDevice(Base):
     owner: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(Enum("known", "unknown", "guest", "rogue"), default="unknown")
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    is_fixed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    fixed_x: Mapped[Optional[float]] = mapped_column(DECIMAL(12, 8), nullable=True)
+    fixed_y: Mapped[Optional[float]] = mapped_column(DECIMAL(12, 8), nullable=True)
+    fixed_z: Mapped[Optional[float]] = mapped_column(DECIMAL(12, 8), nullable=True)
+    fixed_floor: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True, default=0)

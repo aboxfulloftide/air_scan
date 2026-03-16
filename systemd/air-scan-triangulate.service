@@ -1,0 +1,17 @@
+[Unit]
+Description=Air Scan Triangulation Engine
+After=network.target air-scan-api.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=matheau
+WorkingDirectory=/home/matheau/code/air_scan
+ExecStart=/home/matheau/miniforge3/bin/python3 scanners/triangulate.py --interval 30
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

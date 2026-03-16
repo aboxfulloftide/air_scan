@@ -7,7 +7,7 @@ set -euo pipefail
 SYSTEMD_DIR=/etc/systemd/system
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-SERVICES=(air-scan-api air-scan-pull air-scan-sync)
+SERVICES=(air-scan-api air-scan-pull air-scan-sync air-scan-triangulate)
 
 echo "Installing air_scan services..."
 
@@ -32,4 +32,4 @@ done
 
 echo ""
 echo "Done. Check status with:"
-echo "  systemctl status air-scan-api air-scan-pull air-scan-sync"
+echo "  systemctl status air-scan-api air-scan-pull air-scan-sync air-scan-triangulate"

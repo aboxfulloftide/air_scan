@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap, LayersControl } from 'react-leaflet'
+import { useSearchParams } from 'react-router-dom'
+import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap, LayersControl, LayerGroup, CircleMarker, Tooltip } from 'react-leaflet'
 import L from 'leaflet'
 import api from '../api/client'
-import { Search, Radio, X, Wifi, Trash2 } from 'lucide-react'
+import { Search, Radio, X, Wifi, Trash2, MonitorSmartphone } from 'lucide-react'
 import DrawingToolbar, { WALL_TYPES, FLOOR_TYPES } from '../components/DrawingToolbar'
 import { DrawingEvents, SavedWalls, SavedFloors } from '../components/MapDrawing'
 
@@ -30,6 +31,29 @@ const apIcon = L.divIcon({
   iconAnchor: [14, 14],
 })
 
+const fixedDeviceIcon = L.divIcon({
+  className: '',
+  html: `<div class="flex items-center justify-center w-7 h-7 rounded-lg border-2 bg-cyan-500/25 border-cyan-300"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-cyan-300"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg></div>`,
+  iconSize: [28, 28],
+  iconAnchor: [14, 14],
+})
+
+// Confidence → CircleMarker style
+const confidenceStyle = (confidence) => {
+  const conf = parseFloat(confidence) || 0
+  if (conf >= 60) return { fillColor: '#3b82f6', color: '#93c5fd' }
+  if (conf >= 30) return { fillColor: '#f59e0b', color: '#fcd34d' }
+  return { fillColor: '#6b7280', color: '#9ca3af' }
+}
+
+// Highlight ring for searched device
+const highlightIcon = L.divIcon({
+  className: '',
+  html: `<div style="width:32px;height:32px;border-radius:50%;border:3px solid #f59e0b;background:rgba(245,158,11,0.15);animation:pulse-ring 1.5s ease-in-out infinite"></div>`,
+  iconSize: [32, 32],
+  iconAnchor: [16, 16],
+})
+
 // Pending placement icon
 const pendingIcon = L.divIcon({
   className: '',
@@ -38,49 +62,97 @@ const pendingIcon = L.divIcon({
   iconAnchor: [16, 16],
 })
 
-function AddressSearch({ onLocate }) {
-  const [address, setAddress] = useState('')
-  const [searching, setSearching] = useState(false)
-
-  const search = async (e) => {
-    e.preventDefault()
-    if (!address.trim()) return
-    setSearching(true)
-    try {
-      const r = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
-        { headers: { 'User-Agent': 'AirScan/0.1' } }
-      )
-      const results = await r.json()
-      if (results.length > 0) {
-        onLocate(parseFloat(results[0].lat), parseFloat(results[0].lon), results[0].display_name)
-      }
-    } finally {
-      setSearching(false)
-    }
-  }
+function DeviceMapSearch({ onSelect }) {
+  const [query, setQuery] = useState('')
+  const { data: results } = useQuery({
+    queryKey: ['mapDeviceSearch', query],
+    queryFn: () => api.get('/maps/devices/search', { params: { q: query } }).then((r) => r.data),
+    enabled: query.length >= 2,
+  })
 
   return (
-    <form onSubmit={search} className="flex gap-2">
-      <div className="relative flex-1">
+    <div className="relative">
+      <div className="relative">
         <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-500" />
-        <input type="text" value={address} onChange={(e) => setAddress(e.target.value)}
-          placeholder="Enter your address..."
+        <input type="text" value={query} onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search devices by name, MAC, owner..."
           className="w-full bg-gray-900 border border-gray-700 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500" />
       </div>
-      <button type="submit" disabled={searching}
-        className="bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-500 disabled:opacity-50">
-        {searching ? '...' : 'Set Location'}
-      </button>
-    </form>
+      {query.length >= 2 && results?.length > 0 && (
+        <div className="absolute z-[1000] mt-1 w-full bg-gray-900 border border-gray-700 rounded-lg max-h-56 overflow-y-auto shadow-lg">
+          {results.map((d) => (
+            <button key={d.mac} onClick={() => { onSelect(d.mac); setQuery('') }}
+              className="w-full text-left px-3 py-2 hover:bg-gray-800 flex items-center justify-between">
+              <div>
+                <span className="text-sm text-white">{d.known_label || d.ssids || d.mac}</span>
+                {(d.known_label || d.ssids) && <span className="text-xs text-gray-500 ml-2 font-mono">{d.mac}</span>}
+                {(d.owner || d.manufacturer) && <div className="text-xs text-gray-500">{d.owner || d.manufacturer}</div>}
+              </div>
+              <div className="text-xs text-gray-500">{d.device_type}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
-function MapRecenter({ lat, lon }) {
+function MapRecenter({ lat, lon, allPoints, focusPoint }) {
+  const map = useMap()
+  const initialDone = useRef(false)
+  const lastFocus = useRef(null)
+
+  // Focus on a specific device (from search or URL param) — always respond to changes
+  useEffect(() => {
+    if (!focusPoint) return
+    const key = focusPoint.join(',')
+    if (key === lastFocus.current) return
+    lastFocus.current = key
+    initialDone.current = true
+    map.setView(focusPoint, 21)
+  }, [focusPoint, map])
+
+  // Initial load: fit bounds or use config anchor
+  useEffect(() => {
+    if (initialDone.current) return
+    if (allPoints && allPoints.length >= 2) {
+      map.fitBounds(allPoints.map((p) => [p[0], p[1]]), { padding: [40, 40], maxZoom: 20 })
+      initialDone.current = true
+    } else if (lat && lon) {
+      map.setView([lat, lon], 20)
+    }
+  }, [lat, lon, allPoints, map])
+
+  return null
+}
+
+function ZoomTracker({ onZoomChange }) {
+  const map = useMap()
+  useMapEvents({ zoomend: () => onZoomChange(map.getZoom()) })
+  useEffect(() => { onZoomChange(map.getZoom()) }, [map, onZoomChange])
+  return null
+}
+
+function AutoTileLayer({ zoom }) {
+  // Satellite imagery gets blurry past zoom 19; switch to street tiles
+  if (zoom >= 19) {
+    return <TileLayer key="street" attribution='&copy; OpenStreetMap'
+      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+      maxZoom={22} maxNativeZoom={19} />
+  }
+  return <TileLayer key="satellite" attribution='Imagery &copy; Esri'
+    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+    maxZoom={22} maxNativeZoom={20} />
+}
+
+function FloorPane() {
   const map = useMap()
   useEffect(() => {
-    if (lat && lon) map.setView([lat, lon], 20)
-  }, [lat, lon, map])
+    if (!map.getPane('floorPane')) {
+      map.createPane('floorPane')
+      map.getPane('floorPane').style.zIndex = 350
+    }
+  }, [map])
   return null
 }
 
@@ -93,39 +165,46 @@ function PlacementHandler({ active, onPlace }) {
   return null
 }
 
-// AP search panel
-function APSearchPanel({ onSelect, onClose }) {
+function DeviceSearchPanel({ title, placeholder, queryKeyPrefix, endpoint, emptyLabel, onSelect, onClose }) {
   const [query, setQuery] = useState('')
   const { data: results } = useQuery({
-    queryKey: ['apSearch', query],
-    queryFn: () => api.get('/maps/aps/search', { params: { q: query } }).then((r) => r.data),
+    queryKey: [queryKeyPrefix, query],
+    queryFn: () => api.get(endpoint, { params: { q: query } }).then((r) => r.data),
     enabled: query.length >= 2,
   })
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-white font-medium">Search for an AP to place</p>
+        <p className="text-sm text-white font-medium">{title}</p>
         <button onClick={onClose} className="text-gray-400 hover:text-white"><X className="w-4 h-4" /></button>
       </div>
       <input type="text" value={query} onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search by SSID, MAC, or manufacturer..." autoFocus
+        placeholder={placeholder} autoFocus
         className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500" />
       {results?.length > 0 && (
         <div className="max-h-48 overflow-y-auto space-y-1">
-          {results.map((ap) => (
-            <button key={ap.mac} onClick={() => onSelect(ap)}
+          {results.map((device) => (
+            <button key={device.mac} onClick={() => onSelect(device)}
               className="w-full text-left bg-gray-800 hover:bg-gray-700 rounded px-3 py-2 flex items-center justify-between">
               <div>
-                <span className="text-sm text-white">{ap.ssids || ap.mac}</span>
-                {ap.ssids && <span className="text-xs text-gray-500 ml-2 font-mono">{ap.mac}</span>}
+                <span className="text-sm text-white">{device.known_label || device.label || device.ssids || device.mac}</span>
+                {(device.known_label || device.label || device.ssids) && (
+                  <span className="text-xs text-gray-500 ml-2 font-mono">{device.mac}</span>
+                )}
+                {(device.owner || device.manufacturer) && (
+                  <div className="text-xs text-gray-500 mt-0.5">{device.owner || device.manufacturer}</div>
+                )}
               </div>
-              <span className="text-xs text-gray-500">{ap.manufacturer || ''}</span>
+              <div className="text-right">
+                <div className="text-xs text-gray-500">{device.device_type || ''}</div>
+                {device.is_fixed ? <div className="text-xs text-cyan-400">Pinned</div> : null}
+              </div>
             </button>
           ))}
         </div>
       )}
-      {query.length >= 2 && results?.length === 0 && <p className="text-xs text-gray-500">No APs found</p>}
+      {query.length >= 2 && results?.length === 0 && <p className="text-xs text-gray-500">{emptyLabel}</p>}
     </div>
   )
 }
@@ -160,12 +239,20 @@ function SelectionBar({ item, type, onDelete, onClose }) {
 
 export default function MapView() {
   const queryClient = useQueryClient()
+  const [searchParams] = useSearchParams()
+  const [searchedMac, setSearchedMac] = useState(null)
+  const [searchedPos, setSearchedPos] = useState(null)
+  const focusMac = searchedMac || searchParams.get('device')
 
   // Placement state
-  const [placementMode, setPlacementMode] = useState('idle') // 'idle' | 'placing_scanner' | 'search_ap' | 'placing_ap'
+  const [placementMode, setPlacementMode] = useState('idle') // 'idle' | 'placing_scanner' | 'search_ap' | 'placing_ap' | 'search_fixed_device' | 'placing_fixed_device'
   const [placingItem, setPlacingItem] = useState(null)
   const [pendingPos, setPendingPos] = useState(null)
   const [zInput, setZInput] = useState('')
+
+  // Zoom tracking for auto tile switch + label visibility
+  const [zoom, setZoom] = useState(20)
+  const handleZoomChange = useCallback((z) => setZoom(z), [])
 
   // Drawing state
   const [drawMode, setDrawMode] = useState('select') // 'select' | 'wall_line' | 'wall_freehand' | 'floor_zone'
@@ -192,6 +279,18 @@ export default function MapView() {
     refetchInterval: 30000,
   })
 
+  const { data: fixedDevices } = useQuery({
+    queryKey: ['fixedDevices'],
+    queryFn: () => api.get('/maps/devices/fixed').then((r) => r.data),
+    refetchInterval: 30000,
+  })
+
+  const { data: computedPositions } = useQuery({
+    queryKey: ['computedPositions'],
+    queryFn: () => api.get('/maps/positions').then((r) => r.data),
+    refetchInterval: 10000,
+  })
+
   const { data: walls } = useQuery({
     queryKey: ['walls'],
     queryFn: () => api.get('/maps/walls').then((r) => r.data),
@@ -202,12 +301,14 @@ export default function MapView() {
     queryFn: () => api.get('/maps/floors').then((r) => r.data),
   })
 
-  // Mutations
-  const saveMapConfig = useMutation({
-    mutationFn: (body) => api.post('/maps/config', body),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['mapConfig'] }),
-  })
+  const scannerList = Array.isArray(scanners) ? scanners : []
+  const placedAPList = Array.isArray(placedAPs) ? placedAPs : []
+  const fixedDeviceList = Array.isArray(fixedDevices) ? fixedDevices : []
+  const computedList = Array.isArray(computedPositions) ? computedPositions : []
+  const wallList = Array.isArray(walls) ? walls : []
+  const floorList = Array.isArray(floors) ? floors : []
 
+  // Mutations
   const updateScanner = useMutation({
     mutationFn: ({ id, ...body }) => api.patch(`/scanners/${id}`, body),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['scanners'] }); resetPlacement() },
@@ -221,6 +322,23 @@ export default function MapView() {
   const removeAP = useMutation({
     mutationFn: (mac) => api.delete(`/maps/aps/${encodeURIComponent(mac)}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['placedAPs'] }),
+  })
+
+  const placeFixedDevice = useMutation({
+    mutationFn: (body) => api.post('/maps/devices/fixed', body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fixedDevices'] })
+      queryClient.invalidateQueries({ queryKey: ['devices'] })
+      resetPlacement()
+    },
+  })
+
+  const removeFixedDevice = useMutation({
+    mutationFn: (mac) => api.delete(`/maps/devices/fixed/${encodeURIComponent(mac)}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fixedDevices'] })
+      queryClient.invalidateQueries({ queryKey: ['devices'] })
+    },
   })
 
   const createWall = useMutation({
@@ -255,7 +373,19 @@ export default function MapView() {
     ? [parseFloat(mapConfig.gps_anchor_lat), parseFloat(mapConfig.gps_anchor_lon)]
     : [39.8283, -98.5795]
 
-  const handleLocate = (lat, lon, label) => saveMapConfig.mutate({ lat, lon, label })
+  const handleDeviceSearch = async (mac) => {
+    setSearchedMac(mac)
+    try {
+      const r = await api.get(`/maps/positions/${encodeURIComponent(mac)}`)
+      if (r.data && r.data.lat != null) {
+        setSearchedPos([parseFloat(r.data.lat), parseFloat(r.data.lon)])
+      } else {
+        setSearchedPos(null)
+      }
+    } catch {
+      setSearchedPos(null)
+    }
+  }
 
   const handleMapClick = (lat, lng) => setPendingPos({ lat, lng })
 
@@ -266,6 +396,14 @@ export default function MapView() {
       updateScanner.mutate({ id: placingItem.id, x_pos: pendingPos.lat, y_pos: pendingPos.lng, z_pos: z })
     } else if (placementMode === 'placing_ap') {
       placeAP.mutate({ mac: placingItem.mac, lat: pendingPos.lat, lon: pendingPos.lng, z_pos: z })
+    } else if (placementMode === 'placing_fixed_device') {
+      placeFixedDevice.mutate({
+        mac: placingItem.mac,
+        port_scan_host_id: placingItem.port_scan_host_id,
+        lat: pendingPos.lat,
+        lon: pendingPos.lng,
+        z_pos: z,
+      })
     }
   }
 
@@ -283,11 +421,35 @@ export default function MapView() {
     }
   }
 
-  const placedScanners = (scanners || []).filter((s) => s.x_pos != null && s.y_pos != null)
-  const unplacedScanners = (scanners || []).filter((s) => s.x_pos == null || s.y_pos == null)
-  const isPlacing = placementMode === 'placing_scanner' || placementMode === 'placing_ap'
+  const placedScanners = scannerList.filter((s) => s.x_pos != null && s.y_pos != null)
+  const unplacedScanners = scannerList.filter((s) => s.x_pos == null || s.y_pos == null)
+
+  // Collect all marker positions for auto-fit on load
+  const allPoints = useMemo(() => {
+    const pts = []
+    for (const s of placedScanners) pts.push([parseFloat(s.x_pos), parseFloat(s.y_pos)])
+    for (const a of placedAPList) pts.push([parseFloat(a.lat), parseFloat(a.lon)])
+    for (const d of fixedDeviceList) pts.push([parseFloat(d.lat), parseFloat(d.lon)])
+    for (const d of computedList) pts.push([parseFloat(d.lat), parseFloat(d.lon)])
+    return pts
+  }, [placedScanners, placedAPList, fixedDeviceList, computedList])
+
+  // Find focus device position — prefer direct lookup, fall back to loaded lists
+  const focusPoint = useMemo(() => {
+    if (!focusMac) return null
+    if (searchedPos) return searchedPos
+    const fixed = fixedDeviceList.find((d) => d.mac === focusMac)
+    if (fixed) return [parseFloat(fixed.lat), parseFloat(fixed.lon)]
+    const ap = placedAPList.find((a) => a.mac === focusMac)
+    if (ap) return [parseFloat(ap.lat), parseFloat(ap.lon)]
+    const computed = computedList.find((d) => d.mac === focusMac)
+    if (computed) return [parseFloat(computed.lat), parseFloat(computed.lon)]
+    return null
+  }, [focusMac, searchedPos, fixedDeviceList, placedAPList, computedList])
+
+  const isPlacing = placementMode === 'placing_scanner' || placementMode === 'placing_ap' || placementMode === 'placing_fixed_device'
   const isDrawing = drawMode !== 'select'
-  const itemLabel = placingItem?.label || placingItem?.hostname || placingItem?.ssids || placingItem?.mac || ''
+  const itemLabel = placingItem?.known_label || placingItem?.label || placingItem?.hostname || placingItem?.ssids || placingItem?.mac || ''
 
   return (
     <div className="p-6 space-y-3 h-full flex flex-col">
@@ -295,15 +457,21 @@ export default function MapView() {
         <h2 className="text-xl font-bold text-white">Map</h2>
         <div className="flex gap-2">
           {placementMode === 'idle' && !isDrawing && (
-            <button onClick={() => { setPlacementMode('search_ap'); setDrawMode('select') }}
-              className="flex items-center gap-2 bg-purple-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-purple-500">
-              <Wifi className="w-4 h-4" /> Place AP
-            </button>
+            <>
+              <button onClick={() => { setPlacementMode('search_fixed_device'); setDrawMode('select') }}
+                className="flex items-center gap-2 bg-cyan-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-cyan-500">
+                <MonitorSmartphone className="w-4 h-4" /> Place Fixed Device
+              </button>
+              <button onClick={() => { setPlacementMode('search_ap'); setDrawMode('select') }}
+                className="flex items-center gap-2 bg-purple-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-purple-500">
+                <Wifi className="w-4 h-4" /> Place AP
+              </button>
+            </>
           )}
         </div>
       </div>
 
-      <AddressSearch onLocate={handleLocate} />
+      <DeviceMapSearch onSelect={handleDeviceSearch} />
 
       {/* Drawing toolbar */}
       {placementMode === 'idle' && (
@@ -334,8 +502,25 @@ export default function MapView() {
       {placementMode !== 'idle' && (
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
           {placementMode === 'search_ap' && (
-            <APSearchPanel
+            <DeviceSearchPanel
+              title="Search for an AP to place"
+              placeholder="Search by SSID, MAC, or manufacturer..."
+              queryKeyPrefix="apSearch"
+              endpoint="/maps/aps/search"
+              emptyLabel="No APs found"
               onSelect={(ap) => { setPlacementMode('placing_ap'); setPlacingItem(ap); setPendingPos(null); setZInput('') }}
+              onClose={resetPlacement}
+            />
+          )}
+
+          {placementMode === 'search_fixed_device' && (
+            <DeviceSearchPanel
+              title="Search for a fixed Wi-Fi device"
+              placeholder="Search by label, owner, SSID, MAC, or manufacturer..."
+              queryKeyPrefix="deviceSearch"
+              endpoint="/maps/devices/search"
+              emptyLabel="No matching devices found"
+              onSelect={(device) => { setPlacementMode('placing_fixed_device'); setPlacingItem(device); setPendingPos(null); setZInput('') }}
               onClose={resetPlacement}
             />
           )}
@@ -344,7 +529,7 @@ export default function MapView() {
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-sm text-white">
-                  Placing {placementMode === 'placing_scanner' ? 'scanner' : 'AP'}: <span className="font-bold text-blue-400">{itemLabel}</span>
+                  Placing {placementMode === 'placing_scanner' ? 'scanner' : placementMode === 'placing_ap' ? 'AP' : 'fixed device'}: <span className="font-bold text-blue-400">{itemLabel}</span>
                   {pendingPos ? ' — confirm to save' : ' — click on the map'}
                 </p>
                 <button onClick={resetPlacement} className="text-gray-400 hover:text-white"><X className="w-4 h-4" /></button>
@@ -368,7 +553,7 @@ export default function MapView() {
               <div className="flex flex-wrap gap-2">
                 {unplacedScanners.map((s) => (
                   <button key={s.id}
-                    onClick={() => { setPlacementMode('placing_scanner'); setPlacingItem(s); setPendingPos(null); setZInput(''); setDrawMode('select') }}
+                    onClick={() => { setPlacementMode('placing_scanner'); setPlacingItem(s); setPendingPos(null); setZInput(s.z_pos ?? ''); setDrawMode('select') }}
                     className="flex items-center gap-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white hover:border-blue-500">
                     <Radio className="w-4 h-4 text-gray-400" />{s.label || s.hostname}
                   </button>
@@ -386,7 +571,7 @@ export default function MapView() {
             <span className="text-xs text-gray-500">Unplaced:</span>
             {unplacedScanners.map((s) => (
               <button key={s.id}
-                onClick={() => { setPlacementMode('placing_scanner'); setPlacingItem(s); setPendingPos(null); setZInput(''); setDrawMode('select') }}
+                onClick={() => { setPlacementMode('placing_scanner'); setPlacingItem(s); setPendingPos(null); setZInput(s.z_pos ?? ''); setDrawMode('select') }}
                 className="flex items-center gap-2 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white hover:border-blue-500">
                 <Radio className="w-3 h-3 text-gray-400" />{s.label || s.hostname}
               </button>
@@ -400,26 +585,168 @@ export default function MapView() {
         <MapContainer center={center} zoom={mapConfig?.gps_anchor_lat ? 20 : 4}
           maxZoom={22} doubleClickZoom={false}
           className="h-full w-full" style={{ background: '#1a1a2e' }}>
+          <AutoTileLayer zoom={zoom} />
+          <ZoomTracker onZoomChange={handleZoomChange} />
+
           <LayersControl position="topright">
-            <LayersControl.BaseLayer name="Satellite" checked>
-              <TileLayer attribution='Imagery &copy; Esri'
-                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                maxZoom={22} maxNativeZoom={20} />
-            </LayersControl.BaseLayer>
-            <LayersControl.BaseLayer name="Street">
-              <TileLayer attribution='&copy; OpenStreetMap'
-                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                maxZoom={22} maxNativeZoom={19} />
-            </LayersControl.BaseLayer>
-            <LayersControl.BaseLayer name="Google Satellite">
-              <TileLayer url="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
-                maxZoom={22} maxNativeZoom={21} />
-            </LayersControl.BaseLayer>
+            <LayersControl.Overlay name="Scanners" checked>
+              <LayerGroup>
+                {placedScanners.map((s) => (
+                  <Marker key={`scanner-${s.id}`} position={[parseFloat(s.x_pos), parseFloat(s.y_pos)]}
+                    icon={scannerIcon(s.health)} interactive={!isPlacing}>
+                    {!isPlacing && (
+                      <Popup>
+                        <div className="text-sm space-y-1">
+                          <p className="font-bold">{s.label || s.hostname}</p>
+                          <p className="text-xs">{s.hostname}</p>
+                          <p className="text-xs">Height: {s.z_pos ? `${parseFloat(s.z_pos)} ft` : 'ground level'}</p>
+                          <p className="text-xs">Status: {s.health}</p>
+                          {s.recent_obs !== undefined && <p className="text-xs">Obs (10m): {s.recent_obs}</p>}
+                          {s.rssi_offset != null && parseFloat(s.rssi_offset) !== 0 && (
+                            <p className="text-xs">RSSI offset: {parseFloat(s.rssi_offset) > 0 ? '+' : ''}{parseFloat(s.rssi_offset).toFixed(1)} dB ({s.calibration_samples} anchors)</p>
+                          )}
+                          <button onClick={() => { setPlacementMode('placing_scanner'); setPlacingItem(s); setPendingPos(null); setZInput(s.z_pos ?? ''); setDrawMode('select') }}
+                            className="text-xs text-blue-400 hover:underline mt-1">Reposition</button>
+                        </div>
+                      </Popup>
+                    )}
+                  </Marker>
+                ))}
+              </LayerGroup>
+            </LayersControl.Overlay>
+
+            <LayersControl.Overlay name="Placed APs" checked>
+              <LayerGroup>
+                {placedAPList.map((ap) => (
+                  <Marker key={`ap-${ap.mac}`} position={[parseFloat(ap.lat), parseFloat(ap.lon)]} icon={apIcon}
+                    interactive={!isPlacing}>
+                    {!isPlacing && (
+                      <Popup>
+                        <div className="text-sm space-y-1">
+                          <p className="font-bold">{ap.ssids || 'Hidden'}</p>
+                          <p className="text-xs font-mono">{ap.mac}</p>
+                          {ap.manufacturer && <p className="text-xs">{ap.manufacturer}</p>}
+                          <p className="text-xs">Height: {ap.z_pos ? `${parseFloat(ap.z_pos)} ft` : 'ground level'}</p>
+                          <div className="flex gap-2 mt-1">
+                            <button onClick={() => { setPlacementMode('placing_ap'); setPlacingItem(ap); setPendingPos(null); setZInput(ap.z_pos ?? ''); setDrawMode('select') }}
+                              className="text-xs text-blue-400 hover:underline">Reposition</button>
+                            <button onClick={() => removeAP.mutate(ap.mac)}
+                              className="text-xs text-red-400 hover:underline">Remove</button>
+                          </div>
+                        </div>
+                      </Popup>
+                    )}
+                  </Marker>
+                ))}
+              </LayerGroup>
+            </LayersControl.Overlay>
+
+            <LayersControl.Overlay name="Fixed Devices" checked>
+              <LayerGroup>
+                {fixedDeviceList.map((device) => (
+                  <Marker key={`fixed-${device.mac}`} position={[parseFloat(device.lat), parseFloat(device.lon)]} icon={fixedDeviceIcon}
+                    interactive={!isPlacing}>
+                    {!isPlacing && (
+                      <Popup>
+                        <div className="text-sm space-y-1">
+                          <p className="font-bold">{device.label || device.ssids || device.mac}</p>
+                          <p className="text-xs font-mono">{device.mac}</p>
+                          <p className="text-xs">{device.device_type} fixed anchor</p>
+                          {device.owner && <p className="text-xs">Owner: {device.owner}</p>}
+                          {device.manufacturer && <p className="text-xs">{device.manufacturer}</p>}
+                          <p className="text-xs">Height: {device.z_pos ? `${parseFloat(device.z_pos)} ft` : 'ground level'}</p>
+                          <div className="flex gap-2 mt-1">
+                            <button onClick={() => { setPlacementMode('placing_fixed_device'); setPlacingItem(device); setPendingPos(null); setZInput(device.z_pos ?? ''); setDrawMode('select') }}
+                              className="text-xs text-blue-400 hover:underline">Reposition</button>
+                            <button onClick={() => removeFixedDevice.mutate(device.mac)}
+                              className="text-xs text-red-400 hover:underline">Remove</button>
+                          </div>
+                        </div>
+                      </Popup>
+                    )}
+                  </Marker>
+                ))}
+              </LayerGroup>
+            </LayersControl.Overlay>
+
+            <LayersControl.Overlay name="Detected Clients" checked>
+              <LayerGroup>
+                {computedList.filter((d) => d.device_type === 'Client').map((d) => {
+                  const style = confidenceStyle(d.confidence)
+                  const name = d.known_label || d.owner || ''
+                  return (
+                    <CircleMarker key={`pos-${d.mac}`}
+                      center={[parseFloat(d.lat), parseFloat(d.lon)]}
+                      radius={zoom >= 20 ? 7 : 5}
+                      pathOptions={{ fillColor: style.fillColor, fillOpacity: 0.7, color: style.color, weight: 2, opacity: 0.9 }}
+                      interactive={!isPlacing}>
+                      {!isPlacing && (
+                        <>
+                          <Tooltip direction="right" offset={[8, 0]}
+                            permanent={zoom >= 21 && !!name}
+                            className="device-tooltip">
+                            {name || d.manufacturer || d.mac}
+                          </Tooltip>
+                          <Popup>
+                            <div className="text-sm space-y-1">
+                              <p className="font-bold">{d.known_label || d.manufacturer || d.mac}</p>
+                              <p className="text-xs font-mono">{d.mac}</p>
+                              {d.owner && <p className="text-xs">Owner: {d.owner}</p>}
+                              {d.manufacturer && <p className="text-xs">{d.manufacturer}</p>}
+                              <p className="text-xs">Confidence: {parseFloat(d.confidence).toFixed(0)}% ({d.method}, {d.scanner_count} scanners)</p>
+                              <p className="text-xs">Status: {d.status || 'unknown'}</p>
+                            </div>
+                          </Popup>
+                        </>
+                      )}
+                    </CircleMarker>
+                  )
+                })}
+              </LayerGroup>
+            </LayersControl.Overlay>
+
+            <LayersControl.Overlay name="Detected APs" checked>
+              <LayerGroup>
+                {computedList.filter((d) => d.device_type === 'AP').map((d) => {
+                  const style = confidenceStyle(d.confidence)
+                  const name = d.ssids || d.known_label || ''
+                  return (
+                    <CircleMarker key={`pos-${d.mac}`}
+                      center={[parseFloat(d.lat), parseFloat(d.lon)]}
+                      radius={zoom >= 20 ? 7 : 5}
+                      pathOptions={{ fillColor: style.fillColor, fillOpacity: 0.7, color: style.color, weight: 2, opacity: 0.9 }}
+                      interactive={!isPlacing}>
+                      {!isPlacing && (
+                        <>
+                          <Tooltip direction="right" offset={[8, 0]}
+                            permanent={zoom >= 21 && !!name}
+                            className="device-tooltip">
+                            {name || d.manufacturer || d.mac}
+                          </Tooltip>
+                          <Popup>
+                            <div className="text-sm space-y-1">
+                              <p className="font-bold">{d.ssids || 'Hidden'}</p>
+                              <p className="text-xs font-mono">{d.mac}</p>
+                              {d.known_label && <p className="text-xs">{d.known_label}</p>}
+                              {d.manufacturer && <p className="text-xs">{d.manufacturer}</p>}
+                              <p className="text-xs">Confidence: {parseFloat(d.confidence).toFixed(0)}% ({d.method}, {d.scanner_count} scanners)</p>
+                              <p className="text-xs">Status: {d.status || 'unknown'}</p>
+                            </div>
+                          </Popup>
+                        </>
+                      )}
+                    </CircleMarker>
+                  )
+                })}
+              </LayerGroup>
+            </LayersControl.Overlay>
           </LayersControl>
 
           <MapRecenter
             lat={mapConfig?.gps_anchor_lat ? parseFloat(mapConfig.gps_anchor_lat) : null}
-            lon={mapConfig?.gps_anchor_lon ? parseFloat(mapConfig.gps_anchor_lon) : null} />
+            lon={mapConfig?.gps_anchor_lon ? parseFloat(mapConfig.gps_anchor_lon) : null}
+            allPoints={allPoints}
+            focusPoint={focusPoint} />
 
           {/* Drawing handler — only active in draw modes */}
           {isDrawing && (
@@ -436,62 +763,35 @@ export default function MapView() {
           {/* Placement handler — only active when placing */}
           {isPlacing && <PlacementHandler active={true} onPlace={handleMapClick} />}
 
+          {/* Floor pane: z-index below overlayPane so markers/circles take click priority */}
+          <FloorPane />
+
           {/* Saved floor zones (render first so walls draw on top) */}
           <SavedFloors
-            floors={floors || []}
+            floors={floorList}
             selectedId={selectedItem?._type === 'floor' ? selectedItem.id : null}
             onSelect={(f) => handleSelectDrawn(f, 'floor')}
+            pane="floorPane"
           />
 
           {/* Saved walls */}
           <SavedWalls
-            walls={walls || []}
+            walls={wallList}
             selectedId={selectedItem?._type === 'wall' ? selectedItem.id : null}
             onSelect={(w) => handleSelectDrawn(w, 'wall')}
           />
 
-          {/* Placed scanners */}
-          {placedScanners.map((s) => (
-            <Marker key={`scanner-${s.id}`} position={[parseFloat(s.x_pos), parseFloat(s.y_pos)]}
-              icon={scannerIcon(s.health)}>
-              <Popup>
-                <div className="text-sm space-y-1">
-                  <p className="font-bold">{s.label || s.hostname}</p>
-                  <p className="text-xs">{s.hostname}</p>
-                  <p className="text-xs">Height: {s.z_pos ? `${parseFloat(s.z_pos)} ft` : 'ground level'}</p>
-                  <p className="text-xs">Status: {s.health}</p>
-                  {s.recent_obs !== undefined && <p className="text-xs">Obs (10m): {s.recent_obs}</p>}
-                  <button onClick={() => { setPlacementMode('placing_scanner'); setPlacingItem(s); setPendingPos(null); setDrawMode('select') }}
-                    className="text-xs text-blue-400 hover:underline mt-1">Reposition</button>
-                </div>
-              </Popup>
-            </Marker>
-          ))}
 
-          {/* Placed APs */}
-          {(placedAPs || []).map((ap) => (
-            <Marker key={`ap-${ap.mac}`} position={[parseFloat(ap.lat), parseFloat(ap.lon)]} icon={apIcon}>
-              <Popup>
-                <div className="text-sm space-y-1">
-                  <p className="font-bold">{ap.ssids || 'Hidden'}</p>
-                  <p className="text-xs font-mono">{ap.mac}</p>
-                  {ap.manufacturer && <p className="text-xs">{ap.manufacturer}</p>}
-                  <p className="text-xs">Height: {ap.z_pos ? `${parseFloat(ap.z_pos)} ft` : 'ground level'}</p>
-                  <div className="flex gap-2 mt-1">
-                    <button onClick={() => { setPlacementMode('placing_ap'); setPlacingItem(ap); setPendingPos(null); setDrawMode('select') }}
-                      className="text-xs text-blue-400 hover:underline">Reposition</button>
-                    <button onClick={() => removeAP.mutate(ap.mac)}
-                      className="text-xs text-red-400 hover:underline">Remove</button>
-                  </div>
-                </div>
-              </Popup>
-            </Marker>
-          ))}
+          {/* Highlight ring on searched/focused device */}
+          {focusMac && focusPoint && (
+            <Marker position={focusPoint} icon={highlightIcon} interactive={false} zIndexOffset={-100} />
+          )}
 
-          {/* Pending placement marker */}
+          {/* Pending placement marker — draggable for fine-tuning */}
           {pendingPos && (
-            <Marker position={[pendingPos.lat, pendingPos.lng]} icon={pendingIcon}>
-              <Popup><p className="text-sm">New position for {itemLabel}</p></Popup>
+            <Marker position={[pendingPos.lat, pendingPos.lng]} icon={pendingIcon} draggable
+              eventHandlers={{ dragend: (e) => { const ll = e.target.getLatLng(); setPendingPos({ lat: ll.lat, lng: ll.lng }) } }}>
+              <Popup><p className="text-sm">Drag to fine-tune position</p></Popup>
             </Marker>
           )}
         </MapContainer>
@@ -504,6 +804,10 @@ export default function MapView() {
         <div className="flex items-center gap-1"><span className="w-4 h-1 bg-orange-500 rounded" /> Addition wall</div>
         <div className="flex items-center gap-1"><span className="w-3 h-3 bg-green-500/30 rounded-full border border-green-400" /> Scanner</div>
         <div className="flex items-center gap-1"><span className="w-3 h-3 bg-purple-500/30 rounded-full border border-purple-400" /> AP</div>
+        <div className="flex items-center gap-1"><span className="w-3 h-3 bg-cyan-500/30 rounded border border-cyan-300" /> Fixed device</div>
+        <div className="flex items-center gap-1"><span className="w-2.5 h-2.5 bg-blue-500/60 rounded-full border border-blue-400" /> Computed (high)</div>
+        <div className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-500/60 rounded-full border border-amber-400" /> Computed (med)</div>
+        <div className="flex items-center gap-1"><span className="w-2 h-2 bg-gray-500/60 rounded-full border border-gray-400" /> Computed (low)</div>
       </div>
     </div>
   )

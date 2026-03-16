@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams, Link } from 'react-router-dom'
 import api from '../api/client'
-import { Search, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Search, ChevronLeft, ChevronRight, MapPin } from 'lucide-react'
 
 const statusColors = {
   known: 'bg-emerald-500/20 text-emerald-400',
@@ -30,9 +30,10 @@ export default function Devices() {
   const page = parseInt(searchParams.get('page') || '1')
   const deviceType = searchParams.get('type') || ''
   const status = searchParams.get('status') || ''
+  const mapped = searchParams.get('mapped') || ''
 
   const { data, isLoading } = useQuery({
-    queryKey: ['devices', page, deviceType, status, searchParams.get('search')],
+    queryKey: ['devices', page, deviceType, status, mapped, searchParams.get('search')],
     queryFn: () =>
       api
         .get('/devices/', {
@@ -41,6 +42,7 @@ export default function Devices() {
             per_page: 50,
             device_type: deviceType || undefined,
             status: status || undefined,
+            mapped: mapped || undefined,
             search: searchParams.get('search') || undefined,
           },
         })
@@ -91,7 +93,7 @@ export default function Devices() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="MAC, manufacturer, SSID..."
+              placeholder="Hostname, MAC, manufacturer, SSID..."
               className="bg-gray-900 border border-gray-700 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 w-72"
             />
           </div>
@@ -121,6 +123,16 @@ export default function Devices() {
           <option value="guest">Guest</option>
           <option value="rogue">Rogue</option>
         </select>
+
+        <select
+          value={mapped}
+          onChange={(e) => setFilter('mapped', e.target.value)}
+          className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"
+        >
+          <option value="">All Devices</option>
+          <option value="yes">Mapped Only</option>
+          <option value="no">Unmapped Only</option>
+        </select>
       </div>
 
       {/* Table */}
@@ -138,6 +150,7 @@ export default function Devices() {
                 <th className="text-left px-4 py-3 font-medium">Status</th>
                 <th className="text-left px-4 py-3 font-medium">Capabilities</th>
                 <th className="text-left px-4 py-3 font-medium">Last Seen</th>
+                <th className="text-left px-4 py-3 font-medium">Map</th>
               </tr>
             </thead>
             <tbody>
@@ -148,6 +161,7 @@ export default function Devices() {
                       {d.mac}
                     </Link>
                     {d.known_label && <div className="text-xs text-gray-400">{d.known_label}</div>}
+                    {d.is_fixed ? <div className="text-xs text-cyan-400">Fixed on map</div> : null}
                   </td>
                   <td className="px-4 py-3">
                     <span className={`text-xs px-2 py-0.5 rounded ${d.device_type === 'AP' ? 'bg-purple-500/20 text-purple-400' : 'bg-cyan-500/20 text-cyan-400'}`}>
@@ -165,6 +179,16 @@ export default function Devices() {
                     {[d.he_capable && 'WiFi 6', d.vht_capable && 'ac', d.ht_capable && 'n'].filter(Boolean).join(', ') || '-'}
                   </td>
                   <td className="px-4 py-3 text-gray-400 text-xs">{timeAgo(d.last_seen)}</td>
+                  <td className="px-4 py-3">
+                    {(d.has_position || d.is_fixed) ? (
+                      <Link to={`/map?device=${encodeURIComponent(d.mac)}`}
+                        className="text-blue-400 hover:text-blue-300" title="View on map">
+                        <MapPin className="w-4 h-4" />
+                      </Link>
+                    ) : (
+                      <span className="text-gray-700">-</span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

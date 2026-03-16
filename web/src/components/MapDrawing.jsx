@@ -234,7 +234,8 @@ function SavedWalls({ walls, selectedId, onSelect }) {
 }
 
 // Render saved floor zones
-function SavedFloors({ floors, selectedId, onSelect }) {
+// pane prop places floors in a lower z-index pane so markers take click priority
+function SavedFloors({ floors, selectedId, onSelect, pane }) {
   return floors.map((f) => {
     let pts
     try {
@@ -248,6 +249,7 @@ function SavedFloors({ floors, selectedId, onSelect }) {
       <Polygon
         key={`floor-${f.id}`}
         positions={pts}
+        pane={pane}
         pathOptions={{
           color: FLOOR_COLORS[f.floor_type] || '#6b7280',
           fillColor: FLOOR_COLORS[f.floor_type] || '#6b7280',
