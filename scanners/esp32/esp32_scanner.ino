@@ -14,6 +14,7 @@
 
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include <time.h>
@@ -94,6 +95,7 @@ static uint8_t channel_to_freq_hi(uint8_t ch) {
 static uint16_t channel_to_freq(uint8_t ch) {
     if (ch >= 1 && ch <= 13) return 2407 + ch * 5;
     if (ch == 14)             return 2484;
+    if (ch >= 36)             return 5000 + ch * 5;
     return 0;
 }
 
@@ -213,11 +215,18 @@ static void IRAM_ATTR pkt_callback(void *buf, wifi_promiscuous_pkt_type_t type) 
 // ── Channel hopping ────────────────────────────────────────────────────────────
 
 static uint8_t pick_channel(time_t now) {
-    // Same deterministic schedule logic as the Pi scanners (single-band variant)
-    int slot   = (int)(now % CYCLE_SECONDS) / SLOT_SECONDS;
-    int minute = (int)(now / CYCLE_SECONDS);
-    int idx    = (minute * (CYCLE_SECONDS / SLOT_SECONDS) + slot) % NUM_CHANNELS;
-    return CHANNELS_24[idx];
+    // Mirrors the Pi scanner's build_schedule() dual-band split.
+    // First half of CYCLE_SECONDS → 2.4 GHz, second half → 5 GHz.
+    int slot  = (int)(now % CYCLE_SECONDS) / SLOT_SECONDS;
+    int cycle = (int)(now / CYCLE_SECONDS);
+    int half  = (CYCLE_SECONDS / SLOT_SECONDS) / 2;  // slots per band per cycle
+
+    if (slot < half) {
+        return CHANNELS_24[(cycle * half + slot) % NUM_CHANNELS];
+    } else {
+        int s = slot - half;
+        return CHANNELS_5[(cycle * half + s) % NUM_CHANNELS_5];
+    }
 }
 
 static void hop_channel(time_t now) {
@@ -272,6 +281,42 @@ static bool sync_ntp() {
     }
     Serial.println(" OK");
     return true;
+}
+
+// ── OTA update check ──────────────────────────────────────────────────────────
+
+static void check_ota() {
+    HTTPClient http;
+    String url = String(API_HOST) + "/api/firmware/check?scanner_name="
+                 + SCANNER_NAME + "&version=" + FIRMWARE_VERSION;
+    http.begin(url);
+    http.setTimeout(8000);
+    int code = http.GET();
+    if (code != 200) {
+        Serial.printf("[OTA] Check failed: HTTP %d\n", code);
+        http.end();
+        return;
+    }
+
+    DynamicJsonDocument doc(512);
+    DeserializationError err = deserializeJson(doc, http.getString());
+    http.end();
+    if (err || !doc["update_available"].as<bool>()) {
+        Serial.println("[OTA] Up to date");
+        return;
+    }
+
+    String fw_url = doc["url"].as<String>();
+    Serial.printf("[OTA] Update available → %s\n", fw_url.c_str());
+
+    WiFiClient client;
+    t_httpUpdate_return ret = httpUpdate.update(client, fw_url);
+    // HTTP_UPDATE_OK causes automatic reboot; only failure lands here
+    if (ret == HTTP_UPDATE_FAILED) {
+        Serial.printf("[OTA] Failed (%d): %s\n",
+                      httpUpdate.getLastError(),
+                      httpUpdate.getLastErrorString().c_str());
+    }
 }
 
 // ── HTTP flush ────────────────────────────────────────────────────────────────
@@ -338,6 +383,10 @@ static void flush_to_api() {
         portENTER_CRITICAL(&buf_mux);
         obs_count = 0;
         portEXIT_CRITICAL(&buf_mux);
+
+        // While WiFi is up: re-sync NTP then check for firmware update
+        sync_ntp();
+        check_ota();
     } else {
         Serial.printf("[API] POST failed: %s\n", http.errorToString(code).c_str());
     }

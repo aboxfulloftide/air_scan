@@ -14,6 +14,9 @@ bin/
 # ESP32 build artifacts
 build/
 
+# Firmware binaries (uploaded via API, not stored in git)
+firmware_store/*.bin
+
 # Python
 __pycache__/
 *.pyc

@@ -10,6 +10,7 @@ from api.maps.router import router as maps_router
 from api.deploy.router import router as deploy_router
 from api.maintenance.router import router as maintenance_router
 from api.observations.router import router as observations_router
+from api.firmware.router import router as firmware_router
 
 app = FastAPI(title="Air Scan", version="0.1.0")
 
@@ -20,6 +21,7 @@ app.include_router(maps_router)
 app.include_router(deploy_router)
 app.include_router(maintenance_router)
 app.include_router(observations_router)
+app.include_router(firmware_router)
 
 # Serve built frontend from static/
 static_dir = Path(__file__).resolve().parent.parent / "static"

@@ -23,7 +23,14 @@
 // Each entry is ~80 bytes; 300 entries = ~24 KB (well within ESP32 RAM)
 #define MAX_OBS         300
 
+// ── Firmware version ──────────────────────────────────────────────────────────
+#define FIRMWARE_VERSION "1.1.0"
+
 // ── Channels ─────────────────────────────────────────────────────────────────
-// ESP32 built-in radio is 2.4 GHz only
+// ESP32-C5: dual-band 2.4 + 5 GHz
+// Cycle splits evenly: first half on 2.4 GHz, second half on 5 GHz
 static const uint8_t CHANNELS_24[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
 #define NUM_CHANNELS    (sizeof(CHANNELS_24) / sizeof(CHANNELS_24[0]))
+
+static const uint8_t CHANNELS_5[]  = {36, 40, 44, 48, 149, 153, 157, 161, 165};
+#define NUM_CHANNELS_5  (sizeof(CHANNELS_5)  / sizeof(CHANNELS_5[0]))
