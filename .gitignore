@@ -6,6 +6,13 @@ deploy/.secrets
 # Local data buffer
 offline_buffer.jsonl
 *_offline_buffer.jsonl
+*.db
+
+# arduino-cli binary (installed locally)
+bin/
+
+# ESP32 build artifacts
+build/
 
 # Python
 __pycache__/
