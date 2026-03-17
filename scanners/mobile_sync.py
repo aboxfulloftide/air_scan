@@ -131,10 +131,11 @@ def sync(sqlite_path, dry_run=False):
         sys.exit(1)
 
     # Pull unsynced observations with their device data
+    # session_id stored as "hostname:started_at" for traceability
     rows = src.execute("""
         SELECT
             o.id        AS obs_id,
-            o.session_id,
+            (s.scanner_host || ':' || s.started_at) AS session_id,
             o.mac,
             o.interface,
             o.scanner_host,
@@ -157,6 +158,7 @@ def sync(sqlite_path, dry_run=False):
             d.last_seen
         FROM observations o
         JOIN devices d ON d.mac = o.mac
+        JOIN sessions s ON s.id = o.session_id
         WHERE o.synced = 0
         ORDER BY o.recorded_at
     """).fetchall()
@@ -242,17 +244,18 @@ def sync(sqlite_path, dry_run=False):
         obs_batch.append((
             row["mac"], row["interface"], row["scanner_host"],
             row["signal_dbm"], row["channel"], row["freq_mhz"], row["channel_flags"],
-            row["gps_lat"], row["gps_lon"],
-            row["recorded_at"],
+            row["gps_lat"], row["gps_lon"], row["gps_fix"],
+            row["session_id"], row["recorded_at"],
         ))
         obs_synced.append(row["obs_id"])
 
         if len(obs_batch) >= BATCH_SIZE:
             cur.executemany("""
-                INSERT INTO observations
+                INSERT INTO mobile_observations
                     (mac, interface, scanner_host, signal_dbm, channel,
-                     freq_mhz, channel_flags, gps_lat, gps_lon, recorded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     freq_mhz, channel_flags, gps_lat, gps_lon, gps_fix,
+                     session_id, recorded_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, obs_batch)
             dst.commit()
             total_written += len(obs_batch)
@@ -261,15 +264,16 @@ def sync(sqlite_path, dry_run=False):
 
     if obs_batch:
         cur.executemany("""
-            INSERT INTO observations
+            INSERT INTO mobile_observations
                 (mac, interface, scanner_host, signal_dbm, channel,
-                 freq_mhz, channel_flags, gps_lat, gps_lon, recorded_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 freq_mhz, channel_flags, gps_lat, gps_lon, gps_fix,
+                 session_id, recorded_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, obs_batch)
         dst.commit()
         total_written += len(obs_batch)
 
-    print(f"\nWrote {total_written} observations to MySQL ({len(seen_macs)} devices)")
+    print(f"\nWrote {total_written} observations to mobile_observations ({len(seen_macs)} devices)")
 
     # Mark synced in SQLite
     src.execute(
