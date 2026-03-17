@@ -234,6 +234,7 @@ static void hop_channel(time_t now) {
     if (ch != current_channel) {
         esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
         current_channel = ch;
+        Serial.printf("[HOP] ch%d\n", ch);
     }
 }
 
@@ -264,10 +265,21 @@ static bool wifi_connect() {
 }
 
 static void wifi_disconnect_and_resume() {
-    WiFi.disconnect(true);
+    // Fully tear down managed-mode WiFi before switching to promiscuous.
+    // On ESP32-C5 the radio needs a clean stop/start cycle between modes.
+    esp_wifi_set_promiscuous(false);
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_MODE_NULL);
+    delay(100);
+    WiFi.mode(WIFI_STA);
     delay(100);
 
-    // Re-enable promiscuous on last known channel
+    // Explicitly accept management frames (required on ESP32-C5)
+    wifi_promiscuous_filter_t filter = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT
+    };
+    esp_wifi_set_promiscuous_filter(&filter);
+
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(current_channel, WIFI_SECOND_CHAN_NONE);
 }
@@ -447,16 +459,11 @@ void loop() {
         take_snapshot(slot_ts);
         last_slot_ts = slot_ts;
 
-        Serial.printf("\r[%ld] ch%-2d | live:%-3d buf:%-3d   ",
-                      slot_ts, current_channel, live_count, obs_count);
-    }
+        // Hop channel at each slot boundary (integer math avoids float precision loss)
+        hop_channel(slot_ts);
 
-    // Hop channel 200ms before next slot boundary
-    float secs_to_next = SLOT_SECONDS - fmod((float)now, SLOT_SECONDS);
-    if (secs_to_next < 0.3f) {
-        hop_channel(now + SLOT_SECONDS);
-        delay(300);
-        return;
+        Serial.printf("[%lld] ch%-3d | live:%-3d buf:%-3d\n",
+                      (long long)slot_ts, current_channel, live_count, obs_count);
     }
 
     // Flush to API every FLUSH_SECONDS
