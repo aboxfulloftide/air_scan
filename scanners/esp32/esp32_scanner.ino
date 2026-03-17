@@ -215,18 +215,24 @@ static void IRAM_ATTR pkt_callback(void *buf, wifi_promiscuous_pkt_type_t type) 
 // ── Channel hopping ────────────────────────────────────────────────────────────
 
 static uint8_t pick_channel(time_t now) {
-    // Mirrors the Pi scanner's build_schedule() dual-band split.
-    // First half of CYCLE_SECONDS → 2.4 GHz, second half → 5 GHz.
     int slot  = (int)(now % CYCLE_SECONDS) / SLOT_SECONDS;
     int cycle = (int)(now / CYCLE_SECONDS);
-    int half  = (CYCLE_SECONDS / SLOT_SECONDS) / 2;  // slots per band per cycle
 
+#if DUAL_BAND
+    // Mirrors the Pi scanner's build_schedule() dual-band split.
+    // First half of CYCLE_SECONDS → 2.4 GHz, second half → 5 GHz.
+    int half = (CYCLE_SECONDS / SLOT_SECONDS) / 2;
     if (slot < half) {
         return CHANNELS_24[(cycle * half + slot) % NUM_CHANNELS];
     } else {
         int s = slot - half;
         return CHANNELS_5[(cycle * half + s) % NUM_CHANNELS_5];
     }
+#else
+    // 2.4 GHz only — use full cycle across all channels
+    int total = CYCLE_SECONDS / SLOT_SECONDS;
+    return CHANNELS_24[(cycle * total + slot) % NUM_CHANNELS];
+#endif
 }
 
 static void hop_channel(time_t now) {
