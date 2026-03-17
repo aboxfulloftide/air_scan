@@ -56,6 +56,7 @@ static uint8_t   current_channel = 1;
 static time_t    last_flush_ts   = 0;
 static time_t    last_slot_ts    = 0;
 static bool      time_synced     = false;
+static uint32_t  flush_count     = 0;
 
 // ── 802.11 frame parsing ──────────────────────────────────────────────────────
 
@@ -410,9 +411,11 @@ static void flush_to_api() {
         obs_count = 0;
         portEXIT_CRITICAL(&buf_mux);
 
-        // While WiFi is up: re-sync NTP then check for firmware update
-        sync_ntp();
-        check_ota();
+        flush_count++;
+
+        // NTP sync every 600 flushes (~10 hours), OTA check every 10 (~10 min)
+        if (flush_count % 10 == 0)  check_ota();
+        if (flush_count % 600 == 0) sync_ntp();
     } else {
         Serial.printf("[API] POST failed: %s\n", http.errorToString(code).c_str());
     }
