@@ -4,6 +4,12 @@
 #define WIFI_SSID       "your-ssid"
 #define WIFI_PASS       "your-password"
 
+// Static IP — set all four to use DHCP instead
+#define STATIC_IP       "192.168.1.30"
+#define STATIC_GW       "192.168.1.1"
+#define STATIC_SUBNET   "255.255.255.0"
+#define STATIC_DNS      "192.168.1.1"
+
 // ── API server ────────────────────────────────────────────────────────────────
 // IP or hostname of the machine running the air_scan API
 #define API_HOST        "http://192.168.1.22:8000"
@@ -11,7 +17,8 @@
 
 // ── Scanner identity ──────────────────────────────────────────────────────────
 // Must be unique — shows up in the scanners table
-#define SCANNER_NAME    "esp32-static-1"
+#define SCANNER_NAME    "livingroom32"
+#define DEVICE_HOSTNAME "livingroom32"
 #define SCAN_IFACE      "esp32-wifi"
 
 // ── Timing ────────────────────────────────────────────────────────────────────

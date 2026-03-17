@@ -242,6 +242,14 @@ static void hop_channel(time_t now) {
 static bool wifi_connect() {
     esp_wifi_set_promiscuous(false);
 
+    WiFi.setHostname(DEVICE_HOSTNAME);
+
+    IPAddress ip, gw, sn, dns;
+    if (ip.fromString(STATIC_IP) && gw.fromString(STATIC_GW) &&
+        sn.fromString(STATIC_SUBNET) && dns.fromString(STATIC_DNS)) {
+        WiFi.config(ip, gw, sn, dns);
+    }
+
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED) {
