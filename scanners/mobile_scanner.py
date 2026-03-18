@@ -109,8 +109,10 @@ def find_usb_storage():
 
 
 if NO_RECORD:
-    print("[INFO] --no-record: scanning only, no data will be written")
-    DB_PATH = None
+    storage_dir = Path("/tmp/air_scan")
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    DB_PATH = storage_dir / DB_FILENAME
+    print(f"[INFO] --no-record: writing live data to {DB_PATH} (not synced to USB)")
 else:
     if args.storage:
         storage_dir = Path(args.storage)
@@ -199,12 +201,8 @@ def init_db(conn):
     conn.commit()
 
 
-if NO_RECORD:
-    db_conn    = None
-    SESSION_ID = None
-else:
-    db_conn    = open_db()
-    init_db(db_conn)
+db_conn = open_db()
+init_db(db_conn)
 
 db_lock = threading.Lock()
 
@@ -228,7 +226,7 @@ def end_session(conn, session_id):
     conn.commit()
 
 
-SESSION_ID = None if NO_RECORD else start_session(db_conn)
+SESSION_ID = start_session(db_conn)
 
 # ---------------------------------------------------------------------------
 # GPS reader
@@ -735,8 +733,7 @@ def snapshot_thread():
             snap = {mac: dict(v) for mac, v in live.items()}
             live.clear()   # reset window — each 10s gets its own best readings
 
-        if not NO_RECORD:
-            write_snapshot(snap, gps, ts)
+        write_snapshot(snap, gps, ts)
 
         gps_str = (f"{gps['lat']:.6f},{gps['lon']:.6f}" if gps["lat"] else "no fix")
         fix_marker = "" if gps["fix"] else " (stale)"

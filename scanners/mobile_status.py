@@ -76,19 +76,40 @@ def find_usb_storage():
 
 if args.db:
     DB_PATH = Path(args.db)
+    DB_CANDIDATES = None   # fixed path, no dynamic selection
 else:
     usb = find_usb_storage()
-    if usb:
-        DB_PATH = usb / "air_scan" / "mobile_scan.db"
-    else:
-        DB_PATH = Path("/tmp/air_scan/mobile_scan.db")
+    usb_db = (usb / "air_scan" / "mobile_scan.db") if usb else None
+    tmp_db = Path("/tmp/air_scan/mobile_scan.db")
+    # Keep both candidates; pick the freshest one on each poll
+    DB_CANDIDATES = [p for p in (usb_db, tmp_db) if p is not None]
+    DB_PATH = None   # resolved per-request below
 
-print(f"[STATUS] Using DB: {DB_PATH}")
+
+def active_db():
+    """Return the DB path with the most recent modification time."""
+    if DB_CANDIDATES is None:
+        return DB_PATH
+    best = None
+    best_mtime = -1
+    for p in DB_CANDIDATES:
+        try:
+            mt = p.stat().st_mtime
+            if mt > best_mtime:
+                best_mtime = mt
+                best       = p
+        except FileNotFoundError:
+            pass
+    return best or DB_CANDIDATES[-1]
+
+_startup_db = active_db()
+print(f"[STATUS] Using DB: {_startup_db} (dynamic={DB_CANDIDATES is not None})")
 print(f"[STATUS] Listening on http://{args.host}:{args.port}")
 
-# Tile cache — on USB drive alongside the DB, fallback to /tmp
-if DB_PATH and DB_PATH.parent.exists():
-    TILE_CACHE = DB_PATH.parent / "tiles"
+# Tile cache — always on USB if available, else /tmp
+_usb_db = next((p for p in (DB_CANDIDATES or []) if "/tmp" not in str(p)), None) if DB_CANDIDATES else DB_PATH
+if _usb_db and _usb_db.parent.exists():
+    TILE_CACHE = _usb_db.parent / "tiles"
 else:
     TILE_CACHE = Path("/tmp/air_scan/tiles")
 TILE_CACHE.mkdir(parents=True, exist_ok=True)
@@ -97,7 +118,7 @@ print(f"[STATUS] Tile cache: {TILE_CACHE}")
 # ---------------------------------------------------------------------------
 # Ignore list — persisted as JSON alongside the DB
 # ---------------------------------------------------------------------------
-IGNORE_FILE = (DB_PATH.parent / "ignore.json") if DB_PATH else Path("/tmp/air_scan/ignore.json")
+IGNORE_FILE = (_startup_db.parent / "ignore.json") if _startup_db else Path("/tmp/air_scan/ignore.json")
 _ignore_lock = threading.Lock()
 
 def load_ignore():
@@ -241,11 +262,12 @@ def start_download(region_name, bbox, min_zoom=10, max_zoom=14):
 
 def query_status():
     """Return dict with gps and wifi data, or error."""
-    if not DB_PATH.exists():
-        return {"error": f"DB not found: {DB_PATH}", "gps": None, "wifi": []}
+    db = active_db()
+    if not db or not db.exists():
+        return {"error": f"DB not found: {db}", "gps": None, "wifi": []}
 
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True,
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True,
                                check_same_thread=False)
         conn.row_factory = sqlite3.Row
 
@@ -277,6 +299,7 @@ def query_status():
                 MAX(o.signal_dbm)  AS signal_dbm,
                 o.channel,
                 o.freq_mhz,
+                MAX(o.recorded_at) AS recorded_at,
                 d.device_type,
                 d.manufacturer,
                 d.is_randomized,
@@ -308,6 +331,7 @@ def query_status():
                 "manufacturer": row["manufacturer"] or "",
                 "is_randomized": bool(row["is_randomized"]),
                 "ssids":       row["ssids"] or "",
+                "recorded_at": row["recorded_at"] or "",
             })
 
         # Session summary
@@ -353,8 +377,7 @@ def scanner_status():
 def system_time_info():
     """Return current system time, timezone, and NTP state."""
     r = subprocess.run(
-        ["timedatectl", "show", "--no-pager",
-         "--property=Timezone,NTPSynchronized,NTP"],
+        ["timedatectl", "show", "--no-pager"],
         capture_output=True, text=True
     )
     info = {}
@@ -417,10 +440,6 @@ def gps_timesync():
     except Exception as e:
         return False, f"time parse error: {e}", gps_time
 
-    # Disable NTP so timedatectl accepts a manual set
-    subprocess.run(["timedatectl", "set-ntp", "false"],
-                   capture_output=True)
-
     # Set clock to GPS UTC time
     r = subprocess.run(
         ["date", "-u", "-s", utc_str],
@@ -470,6 +489,7 @@ HTML = """<!DOCTYPE html>
   #header {
     text-align: center;
     margin-bottom: 16px;
+    position: relative;
   }
   #header .status-bar {
     justify-content: center;
@@ -888,6 +908,40 @@ HTML = """<!DOCTYPE html>
   }
   .ignore-remove:hover { color: var(--red); }
   .ignore-empty { color: var(--muted); font-size: 12px; font-style: italic; }
+  /* Light mode */
+  [data-theme="light"] {
+    --bg:     #f5f6fa;
+    --card:   #ffffff;
+    --border: #dde1ec;
+    --text:   #1a1d27;
+    --muted:  #6b7280;
+    --green:  #1a9e6a;
+    --red:    #d94040;
+    --yellow: #c47d0a;
+    --blue:   #1a6fd4;
+  }
+  [data-theme="light"] .action-overlay { background: rgba(0,0,0,0.35); }
+  [data-theme="light"] tbody tr:active { background: rgba(0,0,0,0.04); }
+  /* Theme toggle button */
+  .theme-toggle {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    color: var(--muted);
+    font-size: 16px;
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    z-index: 10;
+  }
+  .theme-toggle:active { opacity: 0.7; }
 </style>
 <link rel="stylesheet" href="/static/leaflet.css">
 </head>
@@ -895,6 +949,7 @@ HTML = """<!DOCTYPE html>
 <div id="page">
 <div id="header">
 
+<button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">&#9790;</button>
 <h1>Air Scan</h1>
 <p class="subtitle">Mobile Scanner Status</p>
 
@@ -999,7 +1054,29 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-const POLL_MS = 3000;
+const POLL_MS = 10000;
+
+// ---- Theme (dark default, cookie-persisted) ----
+function getCookie(name) {
+  const m = document.cookie.match('(?:^|; )' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function setCookie(name, value) {
+  document.cookie = name + '=' + encodeURIComponent(value) + '; path=/; max-age=31536000; SameSite=Lax';
+}
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = theme === 'light' ? '\u263C' : '\u263D';
+}
+function toggleTheme() {
+  const current = document.documentElement.dataset.theme || 'dark';
+  const next = current === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  setCookie('theme', next);
+}
+// Apply saved theme immediately (default: dark)
+applyTheme(getCookie('theme') || 'dark');
 
 function rssiClass(v) {
   if (v === null || v === undefined) return '';
@@ -1096,12 +1173,12 @@ function render(data) {
         '</td>' +
         '<td class="' + typeClass(row.device_type) + '">' + escHtml(row.device_type) + '</td>' +
         '<td><span class="rssi ' + rssiClass(row.signal_dbm) + '">' + rssiLabel(row.signal_dbm) + '</span></td>' +
-        '<td>' + chanLabel(row) + '</td>' +
+        '<td class="mac">' + escHtml(row.recorded_at ? row.recorded_at.replace('T',' ').replace(/[.]\\d+$/,'') : '\\u2014') + '</td>' +
         '</tr>';
     }).join('');
     wifiBody.innerHTML =
       '<table>' +
-        '<thead><tr><th>Device</th><th>Type</th><th>RSSI</th><th>Ch</th></tr></thead>' +
+        '<thead><tr><th>Device</th><th>Type</th><th>RSSI</th><th>Time (UTC)</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
       '</table>';
   }
@@ -1590,10 +1667,10 @@ class StatusHandler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/api/reboot":
             self.send_json({"ok": True})
-            subprocess.Popen(["shutdown", "-r", "now"])
+            subprocess.Popen(["/usr/sbin/shutdown", "-r", "now"])
         elif path == "/api/shutdown":
             self.send_json({"ok": True})
-            subprocess.Popen(["shutdown", "-h", "now"])
+            subprocess.Popen(["/usr/sbin/shutdown", "-h", "now"])
         elif path == "/api/timesync":
             ok, message, gps_utc = gps_timesync()
             self.send_json({"ok": ok, "message": message, "gps_utc": gps_utc})
