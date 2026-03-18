@@ -166,10 +166,24 @@ def query_status():
             }
 
         conn.close()
-        return {"gps": gps, "wifi": wifi, "session": session, "error": None}
+        return {"gps": gps, "wifi": wifi, "session": session,
+                "scanner": scanner_status(), "error": None}
 
     except Exception as e:
-        return {"error": str(e), "gps": None, "wifi": [], "session": None}
+        return {"error": str(e), "gps": None, "wifi": [], "session": None,
+                "scanner": scanner_status()}
+
+
+def scanner_status():
+    """Return active/inactive state for both scanner services."""
+    result = {}
+    for svc in ("mobile-scanner", "mobile-scanner-test"):
+        r = subprocess.run(
+            ["systemctl", "is-active", svc],
+            capture_output=True, text=True
+        )
+        result[svc] = r.stdout.strip()   # "active", "inactive", "failed", etc.
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +355,41 @@ HTML = """<!DOCTYPE html>
   .btn-reboot   { background: rgba(75,158,245,0.15); color: var(--blue);   border: 1px solid rgba(75,158,245,0.3); }
   .btn-shutdown { background: rgba(255,102,102,0.12); color: var(--red);   border: 1px solid rgba(255,102,102,0.3); }
   .power-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .scanner-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .scanner-row:last-child { border-bottom: none; }
+  .scanner-label { font-size: 13px; font-weight: 500; }
+  .scanner-sublabel { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .scanner-right { display: flex; align-items: center; gap: 8px; }
+  .svc-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 20px;
+    min-width: 56px;
+    text-align: center;
+  }
+  .svc-active   { background: rgba(62,207,142,0.15); color: var(--green); }
+  .svc-inactive { background: rgba(139,146,165,0.12); color: var(--muted); }
+  .svc-failed   { background: rgba(255,102,102,0.15); color: var(--red); }
+  .svc-btn {
+    padding: 5px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid;
+    transition: opacity 0.15s;
+  }
+  .svc-btn:active  { opacity: 0.7; }
+  .svc-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .svc-btn-start { background: rgba(62,207,142,0.12); color: var(--green); border-color: rgba(62,207,142,0.3); }
+  .svc-btn-stop  { background: rgba(255,102,102,0.12); color: var(--red);   border-color: rgba(255,102,102,0.3); }
 </style>
 </head>
 <body>
@@ -358,6 +407,32 @@ HTML = """<!DOCTYPE html>
 <div class="power-row">
   <button class="power-btn btn-reboot"   id="btn-reboot"   onclick="powerAction('reboot')">&#8635; Reboot</button>
   <button class="power-btn btn-shutdown" id="btn-shutdown" onclick="powerAction('shutdown')">&#9210; Shut Down</button>
+</div>
+
+<div class="card">
+  <div class="card-title">Scanner</div>
+  <div class="scanner-row">
+    <div>
+      <div class="scanner-label">Recording</div>
+      <div class="scanner-sublabel">Writes to DB on USB drive</div>
+    </div>
+    <div class="scanner-right">
+      <span class="svc-badge svc-inactive" id="badge-recording">—</span>
+      <button class="svc-btn svc-btn-start" id="btn-recording-start" onclick="svcAction('mobile-scanner','start')">Start</button>
+      <button class="svc-btn svc-btn-stop"  id="btn-recording-stop"  onclick="svcAction('mobile-scanner','stop')">Stop</button>
+    </div>
+  </div>
+  <div class="scanner-row">
+    <div>
+      <div class="scanner-label">Test mode</div>
+      <div class="scanner-sublabel">Scan only, no recording</div>
+    </div>
+    <div class="scanner-right">
+      <span class="svc-badge svc-inactive" id="badge-test">—</span>
+      <button class="svc-btn svc-btn-start" id="btn-test-start" onclick="svcAction('mobile-scanner-test','start')">Start</button>
+      <button class="svc-btn svc-btn-stop"  id="btn-test-stop"  onclick="svcAction('mobile-scanner-test','stop')">Stop</button>
+    </div>
+  </div>
 </div>
 
 <div class="card" id="gps-card">
@@ -474,6 +549,9 @@ function render(data) {
       '</table>';
   }
 
+  // Scanner controls
+  renderScanner(data.scanner || {});
+
   // Status bar
   const dot  = document.getElementById('dot');
   const stxt = document.getElementById('status-text');
@@ -493,6 +571,44 @@ async function poll() {
     const dot = document.getElementById('dot');
     dot.className = 'dot dot-stale';
     document.getElementById('status-text').textContent = 'Offline';
+  }
+}
+
+function renderScanner(scanner) {
+  const services = [
+    { svc: 'mobile-scanner',      id: 'recording' },
+    { svc: 'mobile-scanner-test', id: 'test'      },
+  ];
+  for (const { svc, id } of services) {
+    const state  = scanner[svc] || 'unknown';
+    const active = state === 'active';
+    const badge  = document.getElementById('badge-' + id);
+    const bStart = document.getElementById('btn-' + id + '-start');
+    const bStop  = document.getElementById('btn-' + id + '-stop');
+    badge.textContent = state;
+    badge.className   = 'svc-badge ' + (
+      active ? 'svc-active' : state === 'failed' ? 'svc-failed' : 'svc-inactive'
+    );
+    bStart.disabled = active;
+    bStop.disabled  = !active;
+  }
+}
+
+async function svcAction(svc, action) {
+  // Disable both buttons while request is in flight
+  const id    = svc === 'mobile-scanner' ? 'recording' : 'test';
+  const bStart = document.getElementById('btn-' + id + '-start');
+  const bStop  = document.getElementById('btn-' + id + '-stop');
+  bStart.disabled = true;
+  bStop.disabled  = true;
+  try {
+    const resp = await fetch('/api/scanner/' + encodeURIComponent(svc) + '/' + action,
+                             { method: 'POST' });
+    const data = await resp.json();
+    if (!data.ok) alert('Error: ' + (data.error || 'unknown'));
+    // Status will update on next poll
+  } catch (e) {
+    alert('Request failed: ' + e);
   }
 }
 
@@ -572,6 +688,27 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif path == "/api/shutdown":
             self.send_json({"ok": True})
             subprocess.Popen(["shutdown", "-h", "now"])
+        elif path.startswith("/api/scanner/"):
+            # /api/scanner/<service>/<start|stop>
+            parts = path.split("/")
+            if len(parts) == 5 and parts[4] in ("start", "stop"):
+                svc    = parts[3]
+                action = parts[4]
+                allowed = {"mobile-scanner", "mobile-scanner-test"}
+                if svc in allowed:
+                    r = subprocess.run(
+                        ["systemctl", action, svc],
+                        capture_output=True, text=True
+                    )
+                    if r.returncode == 0:
+                        self.send_json({"ok": True})
+                    else:
+                        self.send_json({"ok": False, "error": r.stderr.strip()})
+                else:
+                    self.send_json({"ok": False, "error": "unknown service"})
+            else:
+                self.send_response(400)
+                self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
