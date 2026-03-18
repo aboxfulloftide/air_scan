@@ -322,6 +322,25 @@ HTML = """<!DOCTYPE html>
     font-size: 12px;
   }
   .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  .power-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .power-btn {
+    flex: 1;
+    padding: 11px 0;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .power-btn:active { opacity: 0.7; }
+  .btn-reboot   { background: rgba(75,158,245,0.15); color: var(--blue);   border: 1px solid rgba(75,158,245,0.3); }
+  .btn-shutdown { background: rgba(255,102,102,0.12); color: var(--red);   border: 1px solid rgba(255,102,102,0.3); }
+  .power-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -335,6 +354,11 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div id="error-box" style="display:none" class="error-msg"></div>
+
+<div class="power-row">
+  <button class="power-btn btn-reboot"   id="btn-reboot"   onclick="powerAction('reboot')">&#8635; Reboot</button>
+  <button class="power-btn btn-shutdown" id="btn-shutdown" onclick="powerAction('shutdown')">&#9210; Shut Down</button>
+</div>
 
 <div class="card" id="gps-card">
   <div class="card-title">GPS <span id="fix-badge"></span></div>
@@ -474,6 +498,30 @@ async function poll() {
 
 poll();
 setInterval(poll, POLL_MS);
+
+async function powerAction(action) {
+  const label = action === 'reboot' ? 'Reboot' : 'Shut Down';
+  if (!confirm(label + ' the Pi?')) return;
+  const btn = document.getElementById('btn-' + action);
+  btn.disabled = true;
+  btn.textContent = action === 'reboot' ? 'Rebooting…' : 'Shutting down…';
+  try {
+    const resp = await fetch('/api/' + action, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      document.getElementById('status-text').textContent =
+        action === 'reboot' ? 'Rebooting — reconnect in ~30s' : 'Shut down';
+      document.getElementById('dot').className = 'dot dot-stale';
+    } else {
+      alert('Error: ' + (data.error || 'unknown'));
+      btn.disabled = false;
+      btn.textContent = action === 'reboot' ? '↻ Reboot' : '⏻ Shut Down';
+    }
+  } catch (e) {
+    alert('Request failed: ' + e);
+    btn.disabled = false;
+  }
+}
 </script>
 </body>
 </html>
@@ -512,6 +560,18 @@ class StatusHandler(BaseHTTPRequestHandler):
             self.send_html(HTML)
         elif path == "/api/status":
             self.send_json(query_status())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        if path == "/api/reboot":
+            self.send_json({"ok": True})
+            subprocess.Popen(["shutdown", "-r", "now"])
+        elif path == "/api/shutdown":
+            self.send_json({"ok": True})
+            subprocess.Popen(["shutdown", "-h", "now"])
         else:
             self.send_response(404)
             self.end_headers()
