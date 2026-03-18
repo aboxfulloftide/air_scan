@@ -429,17 +429,33 @@ HTML = """<!DOCTYPE html>
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 14px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
     padding: 12px;
-    max-width: 640px;
-    margin: 0 auto;
+    min-height: 100vh;
+  }
+  #left-col {
+    flex: 0 0 380px;
+    min-width: 0;
+  }
+  #right-col {
+    flex: 0 0 400px;
+    position: sticky;
+    top: 12px;
+    align-self: flex-start;
   }
   #map {
-    width: 100%;
-    height: 300px;
+    width: 400px;
+    height: 450px;
     border-radius: 10px;
-    overflow: hidden;
-    margin-bottom: 12px;
     border: 1px solid var(--border);
+  }
+  @media (max-width: 820px) {
+    body { flex-direction: column; }
+    #left-col { flex: none; width: 100%; }
+    #right-col { position: static; flex: none; width: 100%; }
+    #map { width: 100%; }
   }
   h1 { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
   .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
@@ -726,6 +742,7 @@ HTML = """<!DOCTYPE html>
 <link rel="stylesheet" href="/static/leaflet.css">
 </head>
 <body>
+<div id="left-col">
 
 <h1>Air Scan</h1>
 <p class="subtitle">Mobile Scanner Status</p>
@@ -769,24 +786,6 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div class="card">
-  <div class="card-title">Map Coverage</div>
-  <select class="region-select" id="region-select" onchange="regionChanged()">
-    <option value="">— Select region —</option>
-  </select>
-  <div class="custom-bbox" id="custom-bbox" style="display:none">
-    <input class="bbox-input" id="bbox-minlat" placeholder="Min lat (S)">
-    <input class="bbox-input" id="bbox-minlon" placeholder="Min lon (W)">
-    <input class="bbox-input" id="bbox-maxlat" placeholder="Max lat (N)">
-    <input class="bbox-input" id="bbox-maxlon" placeholder="Max lon (E)">
-  </div>
-  <button class="dl-btn" id="dl-btn" onclick="startDownload()">Download Tiles (z10–z14)</button>
-  <div class="progress-wrap" id="progress-wrap" style="display:none">
-    <div class="progress-bar" id="progress-bar"></div>
-  </div>
-  <div class="dl-status" id="dl-status"></div>
-</div>
-
-<div class="card">
   <div class="card-title">System Time</div>
   <div class="time-display" id="sys-time">—</div>
   <div class="time-meta" id="sys-time-meta">—</div>
@@ -814,8 +813,6 @@ HTML = """<!DOCTYPE html>
   <div class="card-title">GPS <span id="fix-badge"></span></div>
   <div id="gps-body"><div class="no-fix">Waiting for data…</div></div>
 </div>
-
-<div id="map"></div>
 
 <div class="card">
   <div class="card-title">WiFi — Last 60 s, 10 newest <span id="wifi-count"></span></div>
@@ -1227,6 +1224,27 @@ async function powerAction(action) {
 }
 </script>
 <script src="/static/leaflet.js"></script>
+</div><!-- #left-col -->
+<div id="right-col">
+<div id="map"></div>
+<div class="card" style="margin-top:12px">
+  <div class="card-title">Map Coverage</div>
+  <select class="region-select" id="region-select" onchange="regionChanged()">
+    <option value="">— Select region —</option>
+  </select>
+  <div class="custom-bbox" id="custom-bbox" style="display:none">
+    <input class="bbox-input" id="bbox-minlat" placeholder="Min lat (S)">
+    <input class="bbox-input" id="bbox-minlon" placeholder="Min lon (W)">
+    <input class="bbox-input" id="bbox-maxlat" placeholder="Max lat (N)">
+    <input class="bbox-input" id="bbox-maxlon" placeholder="Max lon (E)">
+  </div>
+  <button class="dl-btn" id="dl-btn" onclick="startDownload()">Download Tiles (z10–z14)</button>
+  <div class="progress-wrap" id="progress-wrap" style="display:none">
+    <div class="progress-bar" id="progress-bar"></div>
+  </div>
+  <div class="dl-status" id="dl-status"></div>
+</div>
+</div><!-- #right-col -->
 </body>
 </html>
 """
