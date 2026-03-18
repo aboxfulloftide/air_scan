@@ -95,6 +95,30 @@ TILE_CACHE.mkdir(parents=True, exist_ok=True)
 print(f"[STATUS] Tile cache: {TILE_CACHE}")
 
 # ---------------------------------------------------------------------------
+# Ignore list — persisted as JSON alongside the DB
+# ---------------------------------------------------------------------------
+IGNORE_FILE = (DB_PATH.parent / "ignore.json") if DB_PATH else Path("/tmp/air_scan/ignore.json")
+_ignore_lock = threading.Lock()
+
+def load_ignore():
+    try:
+        data = json.loads(IGNORE_FILE.read_text())
+        return {
+            "ssids": [s.lower() for s in data.get("ssids", [])],
+            "macs":  [m.lower() for m in data.get("macs",  [])],
+        }
+    except Exception:
+        return {"ssids": ["airscan"], "macs": []}
+
+def save_ignore(data):
+    IGNORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    IGNORE_FILE.write_text(json.dumps(data, indent=2))
+
+# Seed the file with the hotspot SSID if it doesn't exist yet
+if not IGNORE_FILE.exists():
+    save_ignore({"ssids": ["airscan"], "macs": []})
+
+# ---------------------------------------------------------------------------
 # Known regions (minLat, minLon, maxLat, maxLon)
 # ---------------------------------------------------------------------------
 REGIONS = {
@@ -266,8 +290,15 @@ def query_status():
             LIMIT 10
         """).fetchall()
 
+        ignore = load_ignore()
         wifi = []
         for row in wifi_rows:
+            mac = row["mac"].lower()
+            ssids = [s.strip().lower() for s in (row["ssids"] or "").split(",") if s.strip()]
+            if mac in ignore["macs"]:
+                continue
+            if any(s in ignore["ssids"] for s in ssids):
+                continue
             wifi.append({
                 "mac":         row["mac"],
                 "signal_dbm":  row["signal_dbm"],
@@ -299,11 +330,12 @@ def query_status():
         conn.close()
         return {"gps": gps, "wifi": wifi, "session": session,
                 "scanner": scanner_status(), "sysTime": system_time_info(),
-                "error": None}
+                "ignore": load_ignore(), "error": None}
 
     except Exception as e:
         return {"error": str(e), "gps": None, "wifi": [], "session": None,
-                "scanner": scanner_status(), "sysTime": system_time_info()}
+                "scanner": scanner_status(), "sysTime": system_time_info(),
+                "ignore": load_ignore()}
 
 
 def scanner_status():
@@ -431,9 +463,22 @@ HTML = """<!DOCTYPE html>
     font-size: 14px;
   }
   #page {
-    max-width: 900px;
+    max-width: 960px;
     margin: 0 auto;
     padding: 12px;
+  }
+  #header {
+    text-align: center;
+    margin-bottom: 16px;
+  }
+  #header .status-bar {
+    justify-content: center;
+    gap: 20px;
+  }
+  #header .power-row {
+    justify-content: center;
+  }
+  #columns {
     display: flex;
     align-items: flex-start;
     gap: 12px;
@@ -454,9 +499,10 @@ HTML = """<!DOCTYPE html>
     border-radius: 10px;
     border: 1px solid var(--border);
     background: var(--card);
+    margin-bottom: 12px;
   }
   @media (max-width: 820px) {
-    #page { flex-direction: column; }
+    #columns { flex-direction: column; }
     #right-col { position: static; flex: none; width: 100%; }
   }
   h1 { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
@@ -582,8 +628,7 @@ HTML = """<!DOCTYPE html>
     margin-bottom: 12px;
   }
   .power-btn {
-    flex: 1;
-    padding: 11px 0;
+    padding: 11px 24px;
     border: none;
     border-radius: 8px;
     font-size: 14px;
@@ -738,12 +783,117 @@ HTML = """<!DOCTYPE html>
   }
   .dl-status { font-size: 11px; color: var(--muted); min-height: 14px; }
   .leaflet-control-attribution { font-size: 9px !important; }
+  /* Ignore list */
+  /* Action sheet (tap on WiFi row) */
+  .action-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+  }
+  .action-overlay.open { display: flex; }
+  .action-sheet {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    width: 90%;
+    max-width: 400px;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .action-sheet-title {
+    font-size: 11px;
+    color: var(--muted);
+    text-align: center;
+    margin-bottom: 12px;
+    font-family: var(--mono);
+  }
+  .action-btn {
+    display: block;
+    width: 100%;
+    padding: 13px;
+    margin-bottom: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+  }
+  .action-btn:active { opacity: 0.7; }
+  .action-btn-label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
+  .action-btn-value { font-family: var(--mono); font-size: 13px; color: var(--yellow); }
+  .action-cancel {
+    display: block;
+    width: 100%;
+    padding: 13px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+    margin-top: 4px;
+  }
+  /* Row tap highlight */
+  tbody tr { cursor: pointer; }
+  tbody tr:active { background: rgba(255,255,255,0.04); }
+  .ignore-add-btn {
+    padding: 5px 12px;
+    background: rgba(75,158,245,0.12);
+    color: var(--blue);
+    border: 1px solid rgba(75,158,245,0.3);
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .ignore-section-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 6px 0 4px;
+  }
+  .ignore-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 7px;
+    font-size: 11px;
+    font-family: var(--mono);
+    margin: 2px 3px 2px 0;
+  }
+  .ignore-remove {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0;
+  }
+  .ignore-remove:hover { color: var(--red); }
+  .ignore-empty { color: var(--muted); font-size: 12px; font-style: italic; }
 </style>
 <link rel="stylesheet" href="/static/leaflet.css">
 </head>
 <body>
 <div id="page">
-<div id="left-col">
+<div id="header">
 
 <h1>Air Scan</h1>
 <p class="subtitle">Mobile Scanner Status</p>
@@ -759,6 +909,10 @@ HTML = """<!DOCTYPE html>
   <button class="power-btn btn-reboot"   id="btn-reboot"   onclick="powerAction('reboot')">&#8635; Reboot</button>
   <button class="power-btn btn-shutdown" id="btn-shutdown" onclick="powerAction('shutdown')">&#9210; Shut Down</button>
 </div>
+</div><!-- #header -->
+
+<div id="columns">
+<div id="left-col">
 
 <div class="card">
   <div class="card-title">Scanner</div>
@@ -818,6 +972,30 @@ HTML = """<!DOCTYPE html>
 <div class="card">
   <div class="card-title">WiFi — Last 60 s, 10 newest <span id="wifi-count"></span></div>
   <div id="wifi-body"><div class="empty">Waiting for data…</div></div>
+</div>
+
+<div class="card">
+  <div class="card-title">Ignore List</div>
+  <div class="ignore-section-label">SSIDs</div>
+  <div id="ignore-ssids"><span class="ignore-empty">none</span></div>
+  <div class="ignore-section-label" style="margin-top:8px">MACs</div>
+  <div id="ignore-macs"><span class="ignore-empty">none</span></div>
+</div>
+
+<!-- Action sheet (appears when tapping a WiFi row) -->
+<div class="action-overlay" id="action-overlay" onclick="actionClose(event)">
+  <div class="action-sheet">
+    <div class="action-sheet-title" id="action-title"></div>
+    <button class="action-btn" id="action-ssid" onclick="actionIgnore('ssid')">
+      <span class="action-btn-label">Ignore SSID</span>
+      <span class="action-btn-value" id="action-ssid-val"></span>
+    </button>
+    <button class="action-btn" id="action-mac-btn" onclick="actionIgnore('mac')">
+      <span class="action-btn-label">Ignore MAC</span>
+      <span class="action-btn-value" id="action-mac-val"></span>
+    </button>
+    <button class="action-cancel" onclick="actionClose()">Cancel</button>
+  </div>
 </div>
 
 <script>
@@ -900,15 +1078,17 @@ function render(data) {
   if (!wf.length) {
     wifiBody.innerHTML = '<div class="empty">No devices in last 60 s</div>';
   } else {
-    let rows = wf.map(row => {
+    window._wifiRows = wf;  // store for click handler lookup
+    let rows = wf.map((row, i) => {
       const randBadge = row.is_randomized ? '<span class="rand-badge">rand</span>' : '';
-      const ssidPart  = row.ssids
-        ? '<div class="ssid">' + escHtml(row.ssids.split(',').map(s=>s.trim()).filter(Boolean).join(', ')) + '</div>'
+      const ssidList  = row.ssids ? row.ssids.split(',').map(s=>s.trim()).filter(Boolean) : [];
+      const ssidPart  = ssidList.length
+        ? '<div class="ssid">' + escHtml(ssidList.join(', ')) + '</div>'
         : '';
       const mfrPart   = row.manufacturer
         ? '<div class="mfr">' + escHtml(row.manufacturer) + '</div>'
         : '';
-      return '<tr>' +
+      return '<tr onclick="onRowTap(' + i + ')">' +
         '<td>' +
           ssidPart +
           '<div class="mac">' + escHtml(row.mac) + randBadge + '</div>' +
@@ -925,6 +1105,9 @@ function render(data) {
         '<tbody>' + rows + '</tbody>' +
       '</table>';
   }
+
+  // Ignore list
+  renderIgnore(data.ignore || {ssids:[], macs:[]});
 
   // Map
   updateMap(data.gps);
@@ -1019,6 +1202,73 @@ async function syncTime() {
   btn.textContent = 'Sync Clock from GPS';
 }
 
+// ---------------------------------------------------------------------------
+// WiFi row action sheet
+// ---------------------------------------------------------------------------
+let _actionRow = null;
+
+function onRowTap(i) {
+  const row = window._wifiRows[i];
+  if (!row) return;
+  const mac = row.mac;
+  const ssids = row.ssids ? row.ssids.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const deviceType = row.device_type;
+  _actionRow = { mac, ssids, deviceType };
+  const hasSsid = ssids && ssids.length > 0;
+  document.getElementById('action-title').textContent =
+    (hasSsid ? ssids[0] + '  ·  ' : '') + mac;
+  // SSID button — hide if no SSID
+  const ssidBtn = document.getElementById('action-ssid');
+  if (hasSsid) {
+    document.getElementById('action-ssid-val').textContent = ssids[0];
+    ssidBtn.style.display = '';
+  } else {
+    ssidBtn.style.display = 'none';
+  }
+  document.getElementById('action-mac-val').textContent = mac;
+  document.getElementById('action-overlay').classList.add('open');
+}
+
+function actionClose(e) {
+  // Close if clicking the overlay backdrop, or called directly
+  if (e && e.target !== document.getElementById('action-overlay')) return;
+  document.getElementById('action-overlay').classList.remove('open');
+  _actionRow = null;
+}
+
+async function actionIgnore(type) {
+  if (!_actionRow) return;
+  const value = type === 'ssid' ? (_actionRow.ssids[0] || '') : _actionRow.mac;
+  if (!value) return;
+  document.getElementById('action-overlay').classList.remove('open');
+  await fetch('/api/ignore/add', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type, value}),
+  });
+  _actionRow = null;
+}
+
+function renderIgnore(ig) {
+  const render = (elId, items) => {
+    const el = document.getElementById(elId);
+    if (!items.length) { el.innerHTML = '<span class="ignore-empty">none</span>'; return; }
+    el.innerHTML = items.map(v =>
+      `<span class="ignore-tag">${escHtml(v)}<button class="ignore-remove" onclick="ignoreRemove('${elId === 'ignore-ssids' ? 'ssid' : 'mac'}','${escHtml(v)}')" title="Remove">×</button></span>`
+    ).join('');
+  };
+  render('ignore-ssids', ig.ssids || []);
+  render('ignore-macs',  ig.macs  || []);
+}
+
+async function ignoreRemove(type, value) {
+  await fetch('/api/ignore/remove', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type, value}),
+  });
+}
+
 function renderScanner(scanner) {
   const services = [
     { svc: 'mobile-scanner',      id: 'recording' },
@@ -1062,15 +1312,16 @@ async function svcAction(svc, action) {
 // ---------------------------------------------------------------------------
 const REGIONS = __REGIONS_JSON__;
 
-(function populateRegions() {
+function populateRegions() {
   const sel = document.getElementById('region-select');
+  if (!sel) return;
   for (const name of Object.keys(REGIONS)) {
     const opt = document.createElement('option');
     opt.value = name;
     opt.textContent = name;
     sel.appendChild(opt);
   }
-})();
+}
 
 function regionChanged() {
   const val = document.getElementById('region-select').value;
@@ -1146,15 +1397,6 @@ async function pollDownload() {
   } catch (e) { /* ignore */ }
 }
 
-// Kick off a poll immediately on load to restore state after page refresh
-fetch('/api/tiles/status').then(r => r.json()).then(d => {
-  if (d.running) {
-    document.getElementById('progress-wrap').style.display = '';
-    document.getElementById('dl-btn').disabled = true;
-    dlPollTimer = setInterval(pollDownload, 1500);
-    pollDownload();
-  }
-}).catch(() => {});
 
 // ---------------------------------------------------------------------------
 // Map (Leaflet)
@@ -1197,7 +1439,11 @@ function updateMap(gps) {
   }
 }
 
-window.addEventListener('load', initMap);
+window.addEventListener('load', () => {
+  populateRegions();
+  initMap();
+  pollDownload();
+});
 
 poll();
 setInterval(poll, POLL_MS);
@@ -1248,6 +1494,7 @@ async function powerAction(action) {
   <div class="dl-status" id="dl-status"></div>
 </div>
 </div><!-- #right-col -->
+</div><!-- #columns -->
 </div><!-- #page -->
 </body>
 </html>
@@ -1306,6 +1553,9 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif path == "/api/tiles/status":
             with _dl_lock:
                 self.send_json(dict(_dl_state))
+        elif path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
         elif path.startswith("/static/"):
             fname = path[len("/static/"):]
             ct = "text/javascript" if fname.endswith(".js") else "text/css"
@@ -1365,6 +1615,23 @@ class StatusHandler(BaseHTTPRequestHandler):
                     self.send_json({"ok": True})
                 else:
                     self.send_json({"ok": False, "error": r.stderr.strip()})
+        elif path in ("/api/ignore/add", "/api/ignore/remove"):
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            itype  = body.get("type", "").lower()
+            value  = body.get("value", "").strip().lower()
+            if itype not in ("ssid", "mac") or not value:
+                self.send_json({"ok": False, "error": "invalid"}); return
+            with _ignore_lock:
+                ig = load_ignore()
+                key = "ssids" if itype == "ssid" else "macs"
+                if path.endswith("/add"):
+                    if value not in ig[key]:
+                        ig[key].append(value)
+                else:
+                    ig[key] = [v for v in ig[key] if v != value]
+                save_ignore(ig)
+            self.send_json({"ok": True})
         elif path == "/api/tiles/download":
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
