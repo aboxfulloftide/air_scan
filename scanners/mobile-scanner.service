@@ -1,0 +1,28 @@
+[Unit]
+Description=Mobile WiFi scanner (recording)
+# Only starts if eth0 has no carrier — see ExecCondition below
+After=network.target gpsd.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/matheau/air_scan
+
+# Block start if ethernet is connected
+ExecCondition=/usr/local/bin/check-no-ethernet.sh
+
+# Put wlan1 into monitor mode before starting
+ExecStartPre=/sbin/ip link set wlan1 down
+ExecStartPre=/sbin/iw dev wlan1 set type monitor
+ExecStartPre=/sbin/ip link set wlan1 up
+
+ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/mobile_scanner.py wlan1
+
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

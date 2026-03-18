@@ -54,10 +54,13 @@ parser.add_argument("--storage", default=None,
                     help="Path for SQLite DB (default: auto-detect USB drive)")
 parser.add_argument("--both-interfaces", action="store_true",
                     help="(Reserved) Enable onboard WiFi alongside USB card")
+parser.add_argument("--no-record", action="store_true",
+                    help="Scan and print but do not write to DB (testing mode)")
 args = parser.parse_args()
 
 SCAN_IFACE       = args.iface
 USE_BOTH         = args.both_interfaces   # reserved; onboard not yet activated
+NO_RECORD        = args.no_record
 HOSTNAME         = socket.gethostname()
 SLOT_SECONDS     = 10
 CYCLE_SECONDS    = 60
@@ -105,18 +108,22 @@ def find_usb_storage():
     return None
 
 
-if args.storage:
-    storage_dir = Path(args.storage)
+if NO_RECORD:
+    print("[INFO] --no-record: scanning only, no data will be written")
+    DB_PATH = None
 else:
-    usb = find_usb_storage()
-    if usb:
-        storage_dir = usb / "air_scan"
+    if args.storage:
+        storage_dir = Path(args.storage)
     else:
-        storage_dir = Path("/tmp/air_scan")
-        print(f"[WARN] No USB drive found — storing locally at {storage_dir}")
+        usb = find_usb_storage()
+        if usb:
+            storage_dir = usb / "air_scan"
+        else:
+            storage_dir = Path("/tmp/air_scan")
+            print(f"[WARN] No USB drive found — storing locally at {storage_dir}")
 
-storage_dir.mkdir(parents=True, exist_ok=True)
-DB_PATH = storage_dir / DB_FILENAME
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    DB_PATH = storage_dir / DB_FILENAME
 
 # ---------------------------------------------------------------------------
 # SQLite setup
@@ -192,9 +199,14 @@ def init_db(conn):
     conn.commit()
 
 
-db_conn    = open_db()
-db_lock    = threading.Lock()
-init_db(db_conn)
+if NO_RECORD:
+    db_conn    = None
+    SESSION_ID = None
+else:
+    db_conn    = open_db()
+    init_db(db_conn)
+
+db_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Session
@@ -216,7 +228,7 @@ def end_session(conn, session_id):
     conn.commit()
 
 
-SESSION_ID = start_session(db_conn)
+SESSION_ID = None if NO_RECORD else start_session(db_conn)
 
 # ---------------------------------------------------------------------------
 # GPS reader
@@ -723,7 +735,8 @@ def snapshot_thread():
             snap = {mac: dict(v) for mac, v in live.items()}
             live.clear()   # reset window — each 10s gets its own best readings
 
-        write_snapshot(snap, gps, ts)
+        if not NO_RECORD:
+            write_snapshot(snap, gps, ts)
 
         gps_str = (f"{gps['lat']:.6f},{gps['lon']:.6f}" if gps["lat"] else "no fix")
         fix_marker = "" if gps["fix"] else " (stale)"
@@ -743,10 +756,10 @@ def snapshot_thread():
 # ---------------------------------------------------------------------------
 
 def on_exit(sig, frame):
-    print(f"\n\nShutting down — ending session {SESSION_ID}")
-    end_session(db_conn, SESSION_ID)
-    print(f"Data stored at: {DB_PATH}")
-    print(f"Total devices seen: {len(seen)}")
+    print(f"\n\nShutting down — total devices seen: {len(seen)}")
+    if not NO_RECORD:
+        end_session(db_conn, SESSION_ID)
+        print(f"Data stored at: {DB_PATH}")
     sys.exit(0)
 
 

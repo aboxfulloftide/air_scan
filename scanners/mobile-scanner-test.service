@@ -1,0 +1,22 @@
+[Unit]
+Description=Mobile WiFi scanner (test mode — no recording)
+# Manual start only — do not enable at boot
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/matheau/air_scan
+
+ExecStartPre=/sbin/ip link set wlan1 down
+ExecStartPre=/sbin/iw dev wlan1 set type monitor
+ExecStartPre=/sbin/ip link set wlan1 up
+
+ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/mobile_scanner.py wlan1 --no-record
+
+# Do not restart — test runs are intentionally stopped
+Restart=no
+
+StandardOutput=journal
+StandardError=journal
+
+# No [Install] section — never enable at boot, always started manually
