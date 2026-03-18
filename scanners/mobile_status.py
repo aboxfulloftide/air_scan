@@ -1168,7 +1168,7 @@ let marker = null;
 let mapReady = false;
 
 function initMap() {
-  map = L.map('map', { zoomControl: true }).setView(HOME, 14);
+  map = L.map('map', { zoomControl: true }).setView(HOME, 18);
   L.tileLayer('/tiles/{z}/{x}/{y}.png', {
     attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     maxZoom: 18,
@@ -1186,7 +1186,7 @@ function updateMap(gps) {
       radius: 8, color, fillColor: color, fillOpacity: 0.85, weight: 2,
     }).addTo(map);
     // Only snap to view on first position
-    map.setView(latlng, 14);
+    map.setView(latlng, 18);
   } else {
     marker.setLatLng(latlng);
     marker.setStyle({ color, fillColor: color });
