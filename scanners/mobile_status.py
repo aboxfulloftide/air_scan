@@ -167,11 +167,12 @@ def query_status():
 
         conn.close()
         return {"gps": gps, "wifi": wifi, "session": session,
-                "scanner": scanner_status(), "error": None}
+                "scanner": scanner_status(), "sysTime": system_time_info(),
+                "error": None}
 
     except Exception as e:
         return {"error": str(e), "gps": None, "wifi": [], "session": None,
-                "scanner": scanner_status()}
+                "scanner": scanner_status(), "sysTime": system_time_info()}
 
 
 def scanner_status():
@@ -184,6 +185,88 @@ def scanner_status():
         )
         result[svc] = r.stdout.strip()   # "active", "inactive", "failed", etc.
     return result
+
+
+def system_time_info():
+    """Return current system time, timezone, and NTP state."""
+    r = subprocess.run(
+        ["timedatectl", "show", "--no-pager",
+         "--property=Timezone,NTPSynchronized,NTP"],
+        capture_output=True, text=True
+    )
+    info = {}
+    for line in r.stdout.splitlines():
+        k, _, v = line.partition("=")
+        info[k] = v
+    return {
+        "utc":         time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+        "timezone":    info.get("Timezone", "UTC"),
+        "ntp_active":  info.get("NTP", "no") == "yes",
+        "ntp_synced":  info.get("NTPSynchronized", "no") == "yes",
+    }
+
+
+def gps_timesync():
+    """
+    Read UTC time from gpsd and set the system clock.
+    Disables NTP first so the manual set is accepted.
+    Returns (ok, message, gps_utc_str).
+    """
+    import socket as _socket
+    try:
+        s = _socket.create_connection(("127.0.0.1", 2947), timeout=5)
+        s.sendall(b'?WATCH={"enable":true,"json":true}\n')
+        s.settimeout(10)
+        buf = ""
+        gps_time = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                chunk = s.recv(4096).decode(errors="replace")
+            except Exception:
+                break
+            buf += chunk
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                try:
+                    obj = json.loads(line.strip())
+                except Exception:
+                    continue
+                if obj.get("class") == "TPV" and obj.get("mode", 0) >= 2:
+                    t = obj.get("time")   # ISO8601 UTC e.g. "2026-03-18T02:00:00.000Z"
+                    if t:
+                        gps_time = t
+                        break
+            if gps_time:
+                break
+        s.close()
+    except Exception as e:
+        return False, f"gpsd error: {e}", None
+
+    if not gps_time:
+        return False, "gpsd connected but no fix yet", None
+
+    # Parse ISO8601 to a struct_time
+    try:
+        ts = gps_time.rstrip("Z").split(".")[0]   # "2026-03-18T02:00:00"
+        tm = time.strptime(ts, "%Y-%m-%dT%H:%M:%S")
+        utc_str = time.strftime("%Y-%m-%d %H:%M:%S", tm)
+    except Exception as e:
+        return False, f"time parse error: {e}", gps_time
+
+    # Disable NTP so timedatectl accepts a manual set
+    subprocess.run(["timedatectl", "set-ntp", "false"],
+                   capture_output=True)
+
+    # Set clock to GPS UTC time
+    r = subprocess.run(
+        ["date", "-u", "-s", utc_str],
+        capture_output=True, text=True
+    )
+    if r.returncode != 0:
+        return False, f"date -s failed: {r.stderr.strip()}", utc_str
+
+    return True, f"Clock set to {utc_str} UTC (from GPS)", utc_str
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +473,56 @@ HTML = """<!DOCTYPE html>
   .svc-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .svc-btn-start { background: rgba(62,207,142,0.12); color: var(--green); border-color: rgba(62,207,142,0.3); }
   .svc-btn-stop  { background: rgba(255,102,102,0.12); color: var(--red);   border-color: rgba(255,102,102,0.3); }
+  .time-display {
+    font-family: var(--mono);
+    font-size: 18px;
+    font-weight: 600;
+    margin: 4px 0 2px;
+  }
+  .time-meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  .tz-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .tz-input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 6px 10px;
+  }
+  .tz-input:focus { outline: none; border-color: var(--blue); }
+  .tz-btn {
+    padding: 6px 14px;
+    background: rgba(75,158,245,0.12);
+    color: var(--blue);
+    border: 1px solid rgba(75,158,245,0.3);
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tz-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .sync-btn {
+    width: 100%;
+    padding: 10px;
+    background: rgba(62,207,142,0.1);
+    color: var(--green);
+    border: 1px solid rgba(62,207,142,0.3);
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .sync-btn:active   { opacity: 0.7; }
+  .sync-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .sync-msg { font-size: 12px; margin-top: 8px; min-height: 16px; }
 </style>
 </head>
 <body>
@@ -433,6 +566,30 @@ HTML = """<!DOCTYPE html>
       <button class="svc-btn svc-btn-stop"  id="btn-test-stop"  onclick="svcAction('mobile-scanner-test','stop')">Stop</button>
     </div>
   </div>
+</div>
+
+<div class="card">
+  <div class="card-title">System Time</div>
+  <div class="time-display" id="sys-time">—</div>
+  <div class="time-meta" id="sys-time-meta">—</div>
+  <div class="tz-row">
+    <input class="tz-input" id="tz-input" list="tz-list" placeholder="Timezone e.g. America/New_York">
+    <datalist id="tz-list">
+      <option value="UTC">
+      <option value="America/New_York">
+      <option value="America/Chicago">
+      <option value="America/Denver">
+      <option value="America/Los_Angeles">
+      <option value="America/Anchorage">
+      <option value="Pacific/Honolulu">
+      <option value="Europe/London">
+      <option value="Europe/Paris">
+      <option value="Asia/Tokyo">
+    </datalist>
+    <button class="tz-btn" id="tz-btn" onclick="setTimezone()">Set TZ</button>
+  </div>
+  <button class="sync-btn" id="sync-btn" onclick="syncTime()">Sync Clock from GPS</button>
+  <div class="sync-msg" id="sync-msg"></div>
 </div>
 
 <div class="card" id="gps-card">
@@ -549,6 +706,9 @@ function render(data) {
       '</table>';
   }
 
+  // System time
+  renderSysTime(data.sysTime || {});
+
   // Scanner controls
   renderScanner(data.scanner || {});
 
@@ -572,6 +732,68 @@ async function poll() {
     dot.className = 'dot dot-stale';
     document.getElementById('status-text').textContent = 'Offline';
   }
+}
+
+function renderSysTime(t) {
+  if (!t.utc) return;
+  document.getElementById('sys-time').textContent = t.utc + ' UTC';
+  const tz   = t.timezone || 'UTC';
+  const ntp  = t.ntp_active  ? (t.ntp_synced ? 'NTP synced' : 'NTP active') : 'NTP off';
+  document.getElementById('sys-time-meta').textContent = tz + '  ·  ' + ntp;
+  // Pre-fill tz input if empty
+  const inp = document.getElementById('tz-input');
+  if (!inp.value) inp.value = tz;
+}
+
+async function setTimezone() {
+  const tz  = document.getElementById('tz-input').value.trim();
+  if (!tz) return;
+  const btn = document.getElementById('tz-btn');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/timezone', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tz})
+    });
+    const data = await resp.json();
+    const msg  = document.getElementById('sync-msg');
+    if (data.ok) {
+      msg.style.color = 'var(--green)';
+      msg.textContent = 'Timezone set to ' + tz;
+    } else {
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Error: ' + (data.error || 'unknown');
+    }
+  } catch (e) {
+    document.getElementById('sync-msg').textContent = 'Request failed: ' + e;
+  }
+  btn.disabled = false;
+}
+
+async function syncTime() {
+  const btn = document.getElementById('sync-btn');
+  const msg = document.getElementById('sync-msg');
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  msg.style.color = 'var(--muted)';
+  msg.textContent = 'Contacting gpsd…';
+  try {
+    const resp = await fetch('/api/timesync', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      msg.style.color = 'var(--green)';
+      msg.textContent = data.message;
+    } else {
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Failed: ' + (data.error || 'unknown');
+    }
+  } catch (e) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = 'Request failed: ' + e;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Sync Clock from GPS';
 }
 
 function renderScanner(scanner) {
@@ -688,6 +910,27 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif path == "/api/shutdown":
             self.send_json({"ok": True})
             subprocess.Popen(["shutdown", "-h", "now"])
+        elif path == "/api/timesync":
+            ok, message, gps_utc = gps_timesync()
+            self.send_json({"ok": ok, "message": message, "gps_utc": gps_utc})
+        elif path == "/api/timezone":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length)
+            try:
+                tz = json.loads(body).get("tz", "").strip()
+            except Exception:
+                tz = ""
+            if not tz:
+                self.send_json({"ok": False, "error": "no timezone provided"})
+            else:
+                r = subprocess.run(
+                    ["timedatectl", "set-timezone", tz],
+                    capture_output=True, text=True
+                )
+                if r.returncode == 0:
+                    self.send_json({"ok": True})
+                else:
+                    self.send_json({"ok": False, "error": r.stderr.strip()})
         elif path.startswith("/api/scanner/"):
             # /api/scanner/<service>/<start|stop>
             parts = path.split("/")
