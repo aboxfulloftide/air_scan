@@ -424,37 +424,22 @@ HTML = """<!DOCTYPE html>
     --mono:   'SF Mono', 'Fira Code', monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
   body {
     background: var(--bg);
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 14px;
-    display: grid;
-    grid-template-columns: 380px 1fr;
-    grid-template-rows: auto 1fr;
-    gap: 0;
-    min-height: 100vh;
-  }
-  /* Left column: header + scrollable panel */
-  #left-col {
-    grid-column: 1;
-    grid-row: 1 / 3;
-    overflow-y: auto;
     padding: 12px;
-    border-right: 1px solid var(--border);
+    max-width: 640px;
+    margin: 0 auto;
   }
-  /* Map fills the right column entirely */
   #map {
-    grid-column: 2;
-    grid-row: 1 / 3;
-    background: #1a1d27;
-  }
-  /* Narrow screens: stack vertically */
-  @media (max-width: 700px) {
-    body { grid-template-columns: 1fr; grid-template-rows: auto auto; }
-    #left-col { grid-column: 1; grid-row: 1; border-right: none; border-bottom: 1px solid var(--border); }
-    #map { grid-column: 1; grid-row: 2; height: 50vw; min-height: 260px; }
+    width: 100%;
+    height: 300px;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
   }
   h1 { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
   .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
@@ -741,7 +726,6 @@ HTML = """<!DOCTYPE html>
 <link rel="stylesheet" href="/static/leaflet.css">
 </head>
 <body>
-<div id="left-col">
 
 <h1>Air Scan</h1>
 <p class="subtitle">Mobile Scanner Status</p>
@@ -830,6 +814,8 @@ HTML = """<!DOCTYPE html>
   <div class="card-title">GPS <span id="fix-badge"></span></div>
   <div id="gps-body"><div class="no-fix">Waiting for data…</div></div>
 </div>
+
+<div id="map"></div>
 
 <div class="card">
   <div class="card-title">WiFi — Last 60 s, 10 newest <span id="wifi-count"></span></div>
@@ -1241,8 +1227,6 @@ async function powerAction(action) {
 }
 </script>
 <script src="/static/leaflet.js"></script>
-</div><!-- #left-col -->
-<div id="map"></div>
 </body>
 </html>
 """
