@@ -15,12 +15,17 @@ Defaults:
 
 import argparse
 import json
+import math
 import os
 import sqlite3
 import subprocess
+import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # ---------------------------------------------------------------------------
 # Args
@@ -80,6 +85,130 @@ else:
 
 print(f"[STATUS] Using DB: {DB_PATH}")
 print(f"[STATUS] Listening on http://{args.host}:{args.port}")
+
+# Tile cache — on USB drive alongside the DB, fallback to /tmp
+if DB_PATH and DB_PATH.parent.exists():
+    TILE_CACHE = DB_PATH.parent / "tiles"
+else:
+    TILE_CACHE = Path("/tmp/air_scan/tiles")
+TILE_CACHE.mkdir(parents=True, exist_ok=True)
+print(f"[STATUS] Tile cache: {TILE_CACHE}")
+
+# ---------------------------------------------------------------------------
+# Known regions (minLat, minLon, maxLat, maxLon)
+# ---------------------------------------------------------------------------
+REGIONS = {
+    "Michigan":      (41.70, -90.42, 48.31, -82.12),
+    "Ohio":          (38.40, -84.82, 42.33, -80.52),
+    "Indiana":       (37.77, -88.10, 41.76, -84.78),
+    "Illinois":      (36.97, -91.51, 42.51, -87.49),
+    "Wisconsin":     (42.49, -92.89, 47.08, -86.80),
+    "Minnesota":     (43.50, -97.24, 49.38, -89.49),
+    "Iowa":          (40.37, -96.64, 43.50, -90.14),
+    "Missouri":      (35.99, -95.77, 40.61, -89.10),
+    "Kentucky":      (36.50, -89.57, 39.15, -81.96),
+    "Tennessee":     (34.98, -90.31, 36.68, -81.65),
+    "Pennsylvania":  (39.72, -80.52, 42.27, -74.69),
+    "New York":      (40.50, -79.76, 45.01, -71.86),
+    "Texas":         (25.84, -106.65, 36.50, -93.51),
+    "California":    (32.53, -124.41, 42.01, -114.13),
+    "Florida":       (24.40, -87.63, 31.00, -80.03),
+    "Georgia":       (30.36, -85.61, 35.00, -80.84),
+    "North Carolina":(33.84, -84.32, 36.59, -75.46),
+    "Virginia":      (36.54, -83.68, 39.47, -75.24),
+    "Washington":    (45.54, -124.73, 49.00, -116.92),
+    "Oregon":        (41.99, -124.57, 46.24, -116.46),
+    "Colorado":      (36.99, -109.05, 41.00, -102.04),
+    "Arizona":       (31.33, -114.82, 37.00, -109.05),
+    "Custom":        None,   # user-defined bbox
+}
+
+# ---------------------------------------------------------------------------
+# Tile math helpers
+# ---------------------------------------------------------------------------
+
+def lon_to_tile_x(lon, zoom):
+    return int((lon + 180) / 360 * 2 ** zoom)
+
+def lat_to_tile_y(lat, zoom):
+    lat_r = math.radians(lat)
+    return int((1 - math.log(math.tan(lat_r) + 1 / math.cos(lat_r)) / math.pi) / 2 * 2 ** zoom)
+
+def tile_count(bbox, min_zoom, max_zoom):
+    min_lat, min_lon, max_lat, max_lon = bbox
+    total = 0
+    for z in range(min_zoom, max_zoom + 1):
+        x0 = lon_to_tile_x(min_lon, z); x1 = lon_to_tile_x(max_lon, z)
+        y0 = lat_to_tile_y(max_lat, z); y1 = lat_to_tile_y(min_lat, z)
+        total += (x1 - x0 + 1) * (y1 - y0 + 1)
+    return total
+
+# ---------------------------------------------------------------------------
+# Tile download state + worker
+# ---------------------------------------------------------------------------
+
+_dl_state = {
+    "running": False, "region": None,
+    "total": 0, "done": 0, "skipped": 0, "failed": 0, "error": None,
+}
+_dl_lock = threading.Lock()
+
+
+def _download_worker(bbox, min_zoom, max_zoom, region_name):
+    min_lat, min_lon, max_lat, max_lon = bbox
+    headers = {"User-Agent": "AirScanMobileStatus/1.0 (offline map cache)"}
+
+    with _dl_lock:
+        _dl_state.update({
+            "running": True, "region": region_name, "error": None,
+            "total": tile_count(bbox, min_zoom, max_zoom),
+            "done": 0, "skipped": 0, "failed": 0,
+        })
+
+    try:
+        for z in range(min_zoom, max_zoom + 1):
+            x0 = lon_to_tile_x(min_lon, z); x1 = lon_to_tile_x(max_lon, z)
+            y0 = lat_to_tile_y(max_lat, z); y1 = lat_to_tile_y(min_lat, z)
+            for x in range(x0, x1 + 1):
+                for y in range(y0, y1 + 1):
+                    tile_path = TILE_CACHE / str(z) / str(x) / f"{y}.png"
+                    if tile_path.exists():
+                        with _dl_lock:
+                            _dl_state["skipped"] += 1
+                            _dl_state["done"]    += 1
+                        continue
+                    tile_path.parent.mkdir(parents=True, exist_ok=True)
+                    url = f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    try:
+                        req = urllib.request.Request(url, headers=headers)
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            tile_path.write_bytes(resp.read())
+                        with _dl_lock:
+                            _dl_state["done"] += 1
+                        time.sleep(0.05)   # ~20 req/s — polite to OSM
+                    except Exception:
+                        with _dl_lock:
+                            _dl_state["failed"] += 1
+                            _dl_state["done"]   += 1
+    except Exception as e:
+        with _dl_lock:
+            _dl_state["error"] = str(e)
+    finally:
+        with _dl_lock:
+            _dl_state["running"] = False
+
+
+def start_download(region_name, bbox, min_zoom=10, max_zoom=14):
+    with _dl_lock:
+        if _dl_state["running"]:
+            return False, "download already in progress"
+    t = threading.Thread(
+        target=_download_worker,
+        args=(bbox, min_zoom, max_zoom, region_name),
+        daemon=True,
+    )
+    t.start()
+    return True, "started"
 
 
 # ---------------------------------------------------------------------------
@@ -293,14 +422,37 @@ HTML = """<!DOCTYPE html>
     --mono:   'SF Mono', 'Fira Code', monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
   body {
     background: var(--bg);
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 14px;
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    grid-template-rows: auto 1fr;
+    gap: 0;
+    min-height: 100vh;
+  }
+  /* Left column: header + scrollable panel */
+  #left-col {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    overflow-y: auto;
     padding: 12px;
-    max-width: 640px;
-    margin: 0 auto;
+    border-right: 1px solid var(--border);
+  }
+  /* Map fills the right column entirely */
+  #map {
+    grid-column: 2;
+    grid-row: 1 / 3;
+    background: #1a1d27;
+  }
+  /* Narrow screens: stack vertically */
+  @media (max-width: 700px) {
+    body { grid-template-columns: 1fr; grid-template-rows: auto auto; }
+    #left-col { grid-column: 1; grid-row: 1; border-right: none; border-bottom: 1px solid var(--border); }
+    #map { grid-column: 1; grid-row: 2; height: 50vw; min-height: 260px; }
   }
   h1 { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
   .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
@@ -523,9 +675,71 @@ HTML = """<!DOCTYPE html>
   .sync-btn:active   { opacity: 0.7; }
   .sync-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .sync-msg { font-size: 12px; margin-top: 8px; min-height: 16px; }
+  /* Map coverage card */
+  .region-select {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 6px 10px;
+    margin-bottom: 8px;
+  }
+  .region-select:focus { outline: none; border-color: var(--blue); }
+  .custom-bbox {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .bbox-input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 12px;
+    padding: 5px 8px;
+    font-family: var(--mono);
+  }
+  .bbox-input::placeholder { color: var(--muted); }
+  .bbox-input:focus { outline: none; border-color: var(--blue); }
+  .dl-btn {
+    width: 100%;
+    padding: 9px;
+    background: rgba(75,158,245,0.12);
+    color: var(--blue);
+    border: 1px solid rgba(75,158,245,0.3);
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-bottom: 8px;
+  }
+  .dl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .progress-wrap {
+    background: var(--border);
+    border-radius: 4px;
+    height: 6px;
+    margin: 6px 0 4px;
+    overflow: hidden;
+  }
+  .progress-bar {
+    height: 100%;
+    border-radius: 4px;
+    background: var(--blue);
+    width: 0%;
+    transition: width 0.5s;
+  }
+  .dl-status { font-size: 11px; color: var(--muted); min-height: 14px; }
+  /* Leaflet dark-mode tweaks */
+  .leaflet-tile-pane { filter: brightness(0.85) saturate(0.9); }
+  .leaflet-control-attribution { font-size: 9px !important; }
 </style>
+<link rel="stylesheet" href="/static/leaflet.css">
 </head>
 <body>
+<div id="left-col">
 
 <h1>Air Scan</h1>
 <p class="subtitle">Mobile Scanner Status</p>
@@ -566,6 +780,24 @@ HTML = """<!DOCTYPE html>
       <button class="svc-btn svc-btn-stop"  id="btn-test-stop"  onclick="svcAction('mobile-scanner-test','stop')">Stop</button>
     </div>
   </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Map Coverage</div>
+  <select class="region-select" id="region-select" onchange="regionChanged()">
+    <option value="">— Select region —</option>
+  </select>
+  <div class="custom-bbox" id="custom-bbox" style="display:none">
+    <input class="bbox-input" id="bbox-minlat" placeholder="Min lat (S)">
+    <input class="bbox-input" id="bbox-minlon" placeholder="Min lon (W)">
+    <input class="bbox-input" id="bbox-maxlat" placeholder="Max lat (N)">
+    <input class="bbox-input" id="bbox-maxlon" placeholder="Max lon (E)">
+  </div>
+  <button class="dl-btn" id="dl-btn" onclick="startDownload()">Download Tiles (z10–z14)</button>
+  <div class="progress-wrap" id="progress-wrap" style="display:none">
+    <div class="progress-bar" id="progress-bar"></div>
+  </div>
+  <div class="dl-status" id="dl-status"></div>
 </div>
 
 <div class="card">
@@ -706,6 +938,9 @@ function render(data) {
       '</table>';
   }
 
+  // Map
+  updateMap(data.gps);
+
   // System time
   renderSysTime(data.sysTime || {});
 
@@ -834,6 +1069,143 @@ async function svcAction(svc, action) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Map coverage / tile download
+// ---------------------------------------------------------------------------
+const REGIONS = __REGIONS_JSON__;
+
+(function populateRegions() {
+  const sel = document.getElementById('region-select');
+  for (const name of Object.keys(REGIONS)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  }
+})();
+
+function regionChanged() {
+  const val = document.getElementById('region-select').value;
+  document.getElementById('custom-bbox').style.display =
+    val === 'Custom' ? '' : 'none';
+}
+
+let dlPollTimer = null;
+
+async function startDownload() {
+  const sel = document.getElementById('region-select').value;
+  if (!sel) { alert('Select a region first.'); return; }
+
+  let body = { region: sel };
+  if (sel === 'Custom') {
+    body.bbox = [
+      parseFloat(document.getElementById('bbox-minlat').value),
+      parseFloat(document.getElementById('bbox-minlon').value),
+      parseFloat(document.getElementById('bbox-maxlat').value),
+      parseFloat(document.getElementById('bbox-maxlon').value),
+    ];
+    if (body.bbox.some(isNaN)) { alert('Fill in all four bbox coordinates.'); return; }
+  }
+
+  const btn = document.getElementById('dl-btn');
+  btn.disabled = true;
+  document.getElementById('progress-wrap').style.display = '';
+  document.getElementById('dl-status').textContent = 'Starting…';
+
+  try {
+    const resp = await fetch('/api/tiles/download', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!data.ok) {
+      alert('Error: ' + data.error);
+      btn.disabled = false;
+      return;
+    }
+  } catch (e) {
+    alert('Request failed: ' + e);
+    btn.disabled = false;
+    return;
+  }
+
+  // Poll progress
+  if (dlPollTimer) clearInterval(dlPollTimer);
+  dlPollTimer = setInterval(pollDownload, 1500);
+}
+
+async function pollDownload() {
+  try {
+    const resp = await fetch('/api/tiles/status');
+    const d    = await resp.json();
+    const pct  = d.total > 0 ? Math.round(d.done / d.total * 100) : 0;
+    document.getElementById('progress-bar').style.width = pct + '%';
+    const skipped = d.skipped > 0 ? ` (${d.skipped} cached)` : '';
+    const failed  = d.failed  > 0 ? ` ${d.failed} failed` : '';
+    document.getElementById('dl-status').textContent =
+      d.running
+        ? `${d.region}: ${d.done}/${d.total} tiles — ${pct}%${skipped}${failed}`
+        : d.error
+          ? `Error: ${d.error}`
+          : d.total > 0
+            ? `Done — ${d.total} tiles${skipped}${failed}`
+            : '';
+    if (!d.running) {
+      clearInterval(dlPollTimer);
+      document.getElementById('dl-btn').disabled = false;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// Kick off a poll immediately on load to restore state after page refresh
+fetch('/api/tiles/status').then(r => r.json()).then(d => {
+  if (d.running) {
+    document.getElementById('progress-wrap').style.display = '';
+    document.getElementById('dl-btn').disabled = true;
+    dlPollTimer = setInterval(pollDownload, 1500);
+    pollDownload();
+  }
+}).catch(() => {});
+
+// ---------------------------------------------------------------------------
+// Map (Leaflet)
+// ---------------------------------------------------------------------------
+let map = null;
+let marker = null;
+let mapReady = false;
+
+function initMap() {
+  map = L.map('map', { zoomControl: true }).setView([39.5, -98.35], 4);
+  L.tileLayer('/tiles/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 18,
+  }).addTo(map);
+  mapReady = true;
+}
+
+function updateMap(gps) {
+  if (!mapReady || !gps || !gps.lat) return;
+  const latlng = [gps.lat, gps.lon];
+  if (!marker) {
+    marker = L.circleMarker(latlng, {
+      radius: 8, color: '#3ecf8e', fillColor: '#3ecf8e',
+      fillOpacity: 0.85, weight: 2,
+    }).addTo(map);
+    map.setView(latlng, 14);
+  } else {
+    marker.setLatLng(latlng);
+    // Re-center only if position drifted more than ~50m from map center
+    const center = map.getCenter();
+    if (map.distance(center, latlng) > 200) {
+      map.panTo(latlng);
+    }
+  }
+  marker.setStyle({ color: gps.fix ? '#3ecf8e' : '#f5a623' });
+}
+
+window.addEventListener('load', initMap);
+
 poll();
 setInterval(poll, POLL_MS);
 
@@ -861,6 +1233,9 @@ async function powerAction(action) {
   }
 }
 </script>
+<script src="/static/leaflet.js"></script>
+</div><!-- #left-col -->
+<div id="map"></div>
 </body>
 </html>
 """
@@ -884,6 +1259,9 @@ class StatusHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_html(self, html):
+        # Inject server-side data into the page
+        regions_for_js = {k: list(v) if v else None for k, v in REGIONS.items()}
+        html = html.replace("__REGIONS_JSON__", json.dumps(regions_for_js))
         body = html.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -892,12 +1270,55 @@ class StatusHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def serve_file(self, file_path, content_type, cache=True):
+        try:
+            data = Path(file_path).read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            if cache:
+                self.send_header("Cache-Control", "max-age=86400")
+            self.end_headers()
+            self.wfile.write(data)
+        except FileNotFoundError:
+            self.send_response(404)
+            self.end_headers()
+
     def do_GET(self):
         path = self.path.split("?")[0]
         if path in ("/", "/index.html"):
             self.send_html(HTML)
         elif path == "/api/status":
             self.send_json(query_status())
+        elif path == "/api/tiles/status":
+            with _dl_lock:
+                self.send_json(dict(_dl_state))
+        elif path.startswith("/static/"):
+            fname = path[len("/static/"):]
+            ct = "text/javascript" if fname.endswith(".js") else "text/css"
+            self.serve_file(STATIC_DIR / fname, ct)
+        elif path.startswith("/tiles/"):
+            # /tiles/{z}/{x}/{y}.png
+            parts = path.strip("/").split("/")
+            if len(parts) == 4:
+                try:
+                    z, x, y = int(parts[1]), int(parts[2]), int(parts[3].replace(".png",""))
+                except ValueError:
+                    self.send_response(400); self.end_headers(); return
+                tile_path = TILE_CACHE / str(z) / str(x) / f"{y}.png"
+                if not tile_path.exists():
+                    tile_path.parent.mkdir(parents=True, exist_ok=True)
+                    url = f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    try:
+                        req = urllib.request.Request(
+                            url, headers={"User-Agent": "AirScanMobileStatus/1.0"})
+                        with urllib.request.urlopen(req, timeout=8) as resp:
+                            tile_path.write_bytes(resp.read())
+                    except Exception:
+                        self.send_response(502); self.end_headers(); return
+                self.serve_file(tile_path, "image/png")
+            else:
+                self.send_response(400); self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
@@ -931,6 +1352,20 @@ class StatusHandler(BaseHTTPRequestHandler):
                     self.send_json({"ok": True})
                 else:
                     self.send_json({"ok": False, "error": r.stderr.strip()})
+        elif path == "/api/tiles/download":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            region_name = body.get("region", "")
+            if region_name == "Custom":
+                bbox = body.get("bbox")
+                if not bbox or len(bbox) != 4:
+                    self.send_json({"ok": False, "error": "invalid bbox"}); return
+            elif region_name in REGIONS and REGIONS[region_name]:
+                bbox = REGIONS[region_name]
+            else:
+                self.send_json({"ok": False, "error": "unknown region"}); return
+            ok, msg = start_download(region_name, bbox)
+            self.send_json({"ok": ok, "error": msg if not ok else None})
         elif path.startswith("/api/scanner/"):
             # /api/scanner/<service>/<start|stop>
             parts = path.split("/")

@@ -29,4 +29,5 @@ __pycache__/
 node_modules/
 dist/
 .next/
-static/
+# Note: scanners/static/ (Leaflet assets) IS committed — only root static/ is excluded
+/static/
