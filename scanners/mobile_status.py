@@ -225,22 +225,24 @@ def query_status():
                                check_same_thread=False)
         conn.row_factory = sqlite3.Row
 
-        # Most recent GPS fix from the last 5 minutes
+        # Most recent GPS fix — current if within 5 min, else last known
         gps_row = conn.execute("""
-            SELECT gps_lat, gps_lon, gps_fix, recorded_at
+            SELECT gps_lat, gps_lon, gps_fix, recorded_at,
+                   recorded_at >= datetime('now', '-5 minutes') AS fresh
             FROM observations
-            WHERE gps_lat IS NOT NULL
-              AND recorded_at >= datetime('now', '-5 minutes')
+            WHERE gps_lat IS NOT NULL AND gps_fix = 1
             ORDER BY recorded_at DESC
             LIMIT 1
         """).fetchone()
 
         gps = None
         if gps_row:
+            fresh = bool(gps_row["fresh"])
             gps = {
                 "lat":        gps_row["gps_lat"],
                 "lon":        gps_row["gps_lon"],
-                "fix":        bool(gps_row["gps_fix"]),
+                "fix":        fresh,           # True only if current fix
+                "last_known": not fresh,       # True if replaying old position
                 "recorded_at": gps_row["recorded_at"],
             }
 
@@ -891,7 +893,9 @@ function render(data) {
   } else {
     const fixHtml = g.fix
       ? '<span class="badge badge-green">FIX</span>'
-      : '<span class="badge badge-yellow">STALE</span>';
+      : g.last_known
+        ? '<span class="badge badge-yellow">LAST KNOWN</span>'
+        : '<span class="badge badge-yellow">STALE</span>';
     fixBadge.innerHTML = fixHtml;
     const mapsLink = g.lat
       ? '<a class="map-btn" href="' + mapsUrl(g.lat, g.lon) + '" target="_blank">Open in Maps</a>'
@@ -1171,12 +1175,14 @@ fetch('/api/tiles/status').then(r => r.json()).then(d => {
 // ---------------------------------------------------------------------------
 // Map (Leaflet)
 // ---------------------------------------------------------------------------
+const HOME = [42.1490341, -83.2161818];   // 2080 Pinetree Dr, Trenton MI
+
 let map = null;
 let marker = null;
 let mapReady = false;
 
 function initMap() {
-  map = L.map('map', { zoomControl: true }).setView([39.5, -98.35], 4);
+  map = L.map('map', { zoomControl: true }).setView(HOME, 14);
   L.tileLayer('/tiles/{z}/{x}/{y}.png', {
     attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     maxZoom: 18,
@@ -1185,23 +1191,24 @@ function initMap() {
 }
 
 function updateMap(gps) {
-  if (!mapReady || !gps || !gps.lat) return;
+  if (!mapReady) return;
+  if (!gps || !gps.lat) return;   // no position at all — stay on HOME
   const latlng = [gps.lat, gps.lon];
+  const color  = gps.fix ? '#3ecf8e' : '#f5a623';   // green=live, yellow=last known
   if (!marker) {
     marker = L.circleMarker(latlng, {
-      radius: 8, color: '#3ecf8e', fillColor: '#3ecf8e',
-      fillOpacity: 0.85, weight: 2,
+      radius: 8, color, fillColor: color, fillOpacity: 0.85, weight: 2,
     }).addTo(map);
+    // Only snap to view on first position
     map.setView(latlng, 14);
   } else {
     marker.setLatLng(latlng);
-    // Re-center only if position drifted more than ~50m from map center
-    const center = map.getCenter();
-    if (map.distance(center, latlng) > 200) {
+    marker.setStyle({ color, fillColor: color });
+    // Re-center only if drifted >200m from map center
+    if (map.distance(map.getCenter(), latlng) > 200) {
       map.panTo(latlng);
     }
   }
-  marker.setStyle({ color: gps.fix ? '#3ecf8e' : '#f5a623' });
 }
 
 window.addEventListener('load', initMap);
