@@ -131,8 +131,8 @@ def query_status():
             LEFT JOIN ssids   s ON s.mac = o.mac
             WHERE o.recorded_at >= datetime('now', '-60 seconds')
             GROUP BY o.mac
-            ORDER BY signal_dbm DESC
-            LIMIT 60
+            ORDER BY o.recorded_at DESC
+            LIMIT 10
         """).fetchall()
 
         wifi = []
@@ -598,7 +598,7 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div class="card">
-  <div class="card-title">WiFi — Last 60 s <span id="wifi-count"></span></div>
+  <div class="card-title">WiFi — Last 60 s, 10 newest <span id="wifi-count"></span></div>
   <div id="wifi-body"><div class="empty">Waiting for data…</div></div>
 </div>
 
