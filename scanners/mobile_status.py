@@ -429,14 +429,17 @@ HTML = """<!DOCTYPE html>
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 14px;
+  }
+  #page {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 12px;
     display: flex;
     align-items: flex-start;
     gap: 12px;
-    padding: 12px;
-    min-height: 100vh;
   }
   #left-col {
-    flex: 0 0 380px;
+    flex: 1;
     min-width: 0;
   }
   #right-col {
@@ -446,16 +449,15 @@ HTML = """<!DOCTYPE html>
     align-self: flex-start;
   }
   #map {
-    width: 400px;
+    width: 100%;
     height: 450px;
     border-radius: 10px;
     border: 1px solid var(--border);
+    background: var(--card);
   }
   @media (max-width: 820px) {
-    body { flex-direction: column; }
-    #left-col { flex: none; width: 100%; }
+    #page { flex-direction: column; }
     #right-col { position: static; flex: none; width: 100%; }
-    #map { width: 100%; }
   }
   h1 { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
   .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
@@ -735,13 +737,12 @@ HTML = """<!DOCTYPE html>
     transition: width 0.5s;
   }
   .dl-status { font-size: 11px; color: var(--muted); min-height: 14px; }
-  /* Leaflet dark-mode tweaks */
-  .leaflet-tile-pane { filter: brightness(0.85) saturate(0.9); }
   .leaflet-control-attribution { font-size: 9px !important; }
 </style>
 <link rel="stylesheet" href="/static/leaflet.css">
 </head>
 <body>
+<div id="page">
 <div id="left-col">
 
 <h1>Air Scan</h1>
@@ -1170,6 +1171,8 @@ function initMap() {
     attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     maxZoom: 18,
   }).addTo(map);
+  // Recalculate size after flex/sticky layout settles
+  setTimeout(() => map.invalidateSize(), 100);
   mapReady = true;
 }
 
@@ -1245,6 +1248,7 @@ async function powerAction(action) {
   <div class="dl-status" id="dl-status"></div>
 </div>
 </div><!-- #right-col -->
+</div><!-- #page -->
 </body>
 </html>
 """
