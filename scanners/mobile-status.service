@@ -1,0 +1,17 @@
+[Unit]
+Description=Mobile scanner status web server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/matheau/air_scan
+ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/mobile_status.py --port 8080
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
