@@ -1,0 +1,1 @@
+ACTION=="change", SUBSYSTEM=="net", KERNEL=="eth*", ATTR{operstate}=="up", RUN+="/bin/systemctl --no-block start mobile-sync.service"

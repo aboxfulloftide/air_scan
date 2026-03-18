@@ -1,0 +1,23 @@
+[Unit]
+Description=Mobile scan sync to central MySQL
+# Wait a moment for DHCP/routing to settle after interface comes up
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/matheau/air_scan
+
+# Brief pause so DHCP has time to assign an address before we try MySQL
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/mobile_sync.py
+
+StandardOutput=journal
+StandardError=journal
+
+# Do NOT restart on failure — leave the SQLite DB intact for manual retry
+Restart=no
+
+# Exit code 1 from the script (e.g. can't reach MySQL) is a soft failure;
+# log it but don't mark the unit as permanently broken.
+SuccessExitStatus=0 1
