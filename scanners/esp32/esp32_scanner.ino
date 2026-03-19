@@ -353,15 +353,38 @@ static void flush_to_api() {
 
     Serial.printf("[FLUSH] %d observations — connecting WiFi\n", obs_count);
 
+    unsigned long t0 = millis();
+
     if (!wifi_connect()) {
         wifi_disconnect_and_resume();
         return;
     }
 
+    // NTP sync every 300 flushes (~5 hours at 60s flush interval)
+    flush_count++;
+    if (flush_count % 300 == 1) sync_ntp();  // sync on first flush, then every 5h
+
+    unsigned long t_wifi = millis();
+
+    // Collect health stats while WiFi is up (macAddress() needs STA mode)
+    uint32_t h_free_heap     = ESP.getFreeHeap();
+    uint32_t h_min_free_heap = ESP.getMinFreeHeap();
+    unsigned long h_uptime   = millis();
+    float h_temp             = temperatureRead();
+    String h_mac             = WiFi.macAddress();
+
     // Build JSON payload
     // Each observation: ~120 bytes JSON; 300 obs = ~36 KB
     DynamicJsonDocument doc(40960);
     doc["scanner_host"] = SCANNER_NAME;
+
+    JsonObject health = doc.createNestedObject("health");
+    health["mac"]           = h_mac;
+    health["free_heap"]     = h_free_heap;
+    health["min_free_heap"] = h_min_free_heap;
+    health["uptime_ms"]     = h_uptime;
+    health["temperature_c"] = serialized(String(h_temp, 1));
+
     JsonArray arr = doc.createNestedArray("observations");
 
     portENTER_CRITICAL(&buf_mux);
@@ -397,6 +420,8 @@ static void flush_to_api() {
     String payload;
     serializeJson(doc, payload);
 
+    unsigned long t_json = millis();
+
     HTTPClient http;
     String url = String(API_HOST) + API_UPLOAD_PATH;
     http.begin(url);
@@ -404,6 +429,11 @@ static void flush_to_api() {
     http.setTimeout(10000);
 
     int code = http.POST(payload);
+
+    unsigned long t_post = millis();
+    Serial.printf("[BENCH] wifi+ntp=%lums  json=%lums  post=%lums  total=%lums\n",
+                  t_wifi - t0, t_json - t_wifi, t_post - t_json, t_post - t0);
+
     if (code > 0) {
         Serial.printf("[API] POST %d — %s\n", code, http.getString().c_str());
         // Clear buffer only on success
@@ -411,11 +441,8 @@ static void flush_to_api() {
         obs_count = 0;
         portEXIT_CRITICAL(&buf_mux);
 
-        flush_count++;
-
-        // NTP sync every 600 flushes (~10 hours), OTA check every 10 (~10 min)
-        if (flush_count % 10 == 0)  check_ota();
-        if (flush_count % 600 == 0) sync_ntp();
+        // OTA check every 10 flushes (~10 min)
+        if (flush_count % 10 == 0) check_ota();
     } else {
         Serial.printf("[API] POST failed: %s\n", http.errorToString(code).c_str());
     }
