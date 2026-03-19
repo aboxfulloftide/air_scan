@@ -9,7 +9,26 @@
  * Required libraries (install via Arduino Library Manager):
  *   - ArduinoJson  (Benoit Blanchon, v6.x)
  *
- * Board: "ESP32 Dev Module" (or your specific variant)
+ * ── Flash settings (arduino-cli) ─────────────────────────────────────────────
+ * Board FQBN:  esp32:esp32:esp32c5:CDCOnBoot=cdc
+ *
+ *   CDCOnBoot=cdc   — REQUIRED. Without this Serial.print() is silent over USB
+ *                     and the device appears dead after flashing.
+ *
+ * Example compile + upload:
+ *   arduino-cli compile --fqbn esp32:esp32:esp32c5:CDCOnBoot=cdc <sketch-dir>
+ *   arduino-cli upload  --fqbn esp32:esp32:esp32c5:CDCOnBoot=cdc \
+ *                       --port /dev/ttyACM0 <sketch-dir>
+ *
+ * Note: arduino-cli requires the sketch directory name to match the .ino file
+ * name. Copy scanners/esp32/ to a temp dir named "esp32_scanner/" before
+ * compiling (the source dir is named "esp32" which doesn't match).
+ *
+ * ── Dual-band notes (ESP32-C5) ───────────────────────────────────────────────
+ * esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO) must be called after WiFi init
+ * or the radio silently ignores 5 GHz channel calls and then stops receiving
+ * on 2.4 GHz too. See wifi_disconnect_and_resume().
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 #include <WiFi.h>
@@ -239,7 +258,16 @@ static uint8_t pick_channel(time_t now) {
 static void hop_channel(time_t now) {
     uint8_t ch = pick_channel(now);
     if (ch != current_channel) {
-        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+        bool band_change = (ch >= 36) != (current_channel >= 36);
+        if (band_change) {
+            // Radio needs promiscuous restart when crossing bands on ESP32-C5
+            esp_wifi_set_promiscuous(false);
+            esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+            esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+            esp_wifi_set_promiscuous(true);
+        } else {
+            esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+        }
         current_channel = ch;
         Serial.printf("[HOP] ch%d\n", ch);
     }
@@ -280,12 +308,16 @@ static void wifi_disconnect_and_resume() {
     delay(100);
     WiFi.mode(WIFI_STA);
     delay(100);
+    esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);  // Enable 2.4+5 GHz (required on ESP32-C5)
 
     // Explicitly accept management frames (required on ESP32-C5)
     wifi_promiscuous_filter_t filter = {
         .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT
     };
     esp_wifi_set_promiscuous_filter(&filter);
+
+    // Re-register callback — WiFi mode cycling (WIFI_MODE_NULL→STA) clears it
+    esp_wifi_set_promiscuous_rx_cb(pkt_callback);
 
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(current_channel, WIFI_SECOND_CHAN_NONE);
