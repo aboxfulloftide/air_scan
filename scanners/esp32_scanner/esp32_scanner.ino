@@ -247,10 +247,13 @@ static bool wifi_connect() {
 }
 
 static void wifi_disconnect_and_resume() {
-    // disconnect(false) = leave AP but keep WiFi driver alive
-    // disconnect(true) calls esp_wifi_stop() which kills promiscuous mode
-    WiFi.disconnect(false);
-    delay(200);
+    // Full stop/start cycle so the WiFi driver gives promiscuous mode a clean slate.
+    // disconnect(false) leaves the driver in a partial STA state where promiscuous
+    // mode silently stops delivering packets after the first flush.
+    WiFi.disconnect(true);   // calls esp_wifi_stop() — full shutdown
+    delay(100);
+    WiFi.mode(WIFI_STA);     // calls esp_wifi_start() — clean restart
+    delay(100);
 
     esp_err_t err = esp_wifi_set_promiscuous(true);
     if (err != ESP_OK) {
@@ -286,18 +289,39 @@ static void flush_to_api() {
 
     Serial.printf("[FLUSH] %d observations — connecting WiFi\n", obs_count);
 
+    unsigned long t0 = millis();
+
     if (!wifi_connect()) {
         wifi_disconnect_and_resume();
         return;
     }
 
-    // Re-sync NTP on every flush to keep timestamps accurate while mobile
-    sync_ntp();
+    // Re-sync NTP every 300 flushes (~5 hours at 60s flush interval)
+    static int flush_count = 0;
+    flush_count++;
+    if (flush_count % 300 == 1) sync_ntp();  // sync on first flush, then every 5h
+
+    unsigned long t_wifi = millis();
+
+    // Collect health stats while WiFi is up (macAddress() needs STA mode)
+    uint32_t h_free_heap     = ESP.getFreeHeap();
+    uint32_t h_min_free_heap = ESP.getMinFreeHeap();
+    unsigned long h_uptime   = millis();
+    float h_temp             = temperatureRead();
+    String h_mac             = WiFi.macAddress();
 
     // Build JSON payload
     // Each observation: ~120 bytes JSON; 300 obs = ~36 KB
     DynamicJsonDocument doc(40960);
     doc["scanner_host"] = SCANNER_NAME;
+
+    JsonObject health = doc.createNestedObject("health");
+    health["mac"]           = h_mac;
+    health["free_heap"]     = h_free_heap;
+    health["min_free_heap"] = h_min_free_heap;
+    health["uptime_ms"]     = h_uptime;
+    health["temperature_c"] = serialized(String(h_temp, 1));
+
     JsonArray arr = doc.createNestedArray("observations");
 
     portENTER_CRITICAL(&buf_mux);
@@ -333,6 +357,8 @@ static void flush_to_api() {
     String payload;
     serializeJson(doc, payload);
 
+    unsigned long t_json = millis();
+
     HTTPClient http;
     String url = String(API_HOST) + API_UPLOAD_PATH;
     http.begin(url);
@@ -340,6 +366,11 @@ static void flush_to_api() {
     http.setTimeout(10000);
 
     int code = http.POST(payload);
+
+    unsigned long t_post = millis();
+    Serial.printf("[BENCH] wifi+ntp=%lums  json=%lums  post=%lums  total=%lums\n",
+                  t_wifi - t0, t_json - t_wifi, t_post - t_json, t_post - t0);
+
     if (code > 0) {
         Serial.printf("[API] POST %d — %s\n", code, http.getString().c_str());
         // Clear buffer only on success

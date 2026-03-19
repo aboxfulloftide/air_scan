@@ -11,8 +11,9 @@ offline_buffer.jsonl
 # arduino-cli binary (installed locally)
 bin/
 
-# ESP32 config with real credentials (never commit)
+# ESP32 config with real credentials (never commit — copy config.h.example to config.h)
 scanners/esp32/config.h
+scanners/esp32_scanner/config.h
 
 # ESP32 build artifacts
 build/

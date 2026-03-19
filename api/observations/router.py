@@ -45,6 +45,23 @@ async def upload_observations(body: dict, db: AsyncSession = Depends(get_db)):
         ON DUPLICATE KEY UPDATE last_heartbeat = NOW()
     """), {"host": scanner_host, "label": scanner_host})
 
+    # ── Device health snapshot (optional) ─────────────────────────────────────
+    health = body.get("health")
+    if health:
+        await db.execute(text("""
+            INSERT INTO scanner_health
+                (scanner_host, mac, free_heap, min_free_heap, uptime_ms, temperature_c, recorded_at)
+            VALUES
+                (:host, :mac, :free_heap, :min_free_heap, :uptime_ms, :temp, NOW())
+        """), {
+            "host":          scanner_host,
+            "mac":           health.get("mac"),
+            "free_heap":     health.get("free_heap"),
+            "min_free_heap": health.get("min_free_heap"),
+            "uptime_ms":     health.get("uptime_ms"),
+            "temp":          health.get("temperature_c"),
+        })
+
     # ── Aggregate device metadata across the batch ─────────────────────────────
     device_rows = {}
     for obs in observations:

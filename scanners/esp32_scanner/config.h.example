@@ -6,7 +6,7 @@
 
 // ── API server ────────────────────────────────────────────────────────────────
 // IP or hostname of the machine running the air_scan API
-#define API_HOST        "http://192.168.1.22:8000"
+#define API_HOST        "http://192.168.1.22:8002"
 #define API_UPLOAD_PATH "/api/observations/upload"
 
 // ── Scanner identity ──────────────────────────────────────────────────────────
