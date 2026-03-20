@@ -548,6 +548,41 @@ def get_caps_and_vendors(pkt):
         elt = elt.payload if isinstance(getattr(elt, "payload", None), Dot11Elt) else None
     return ht, vht, he, vendor_ouis
 
+def get_ssid(pkt):
+    """Extract SSID from Dot11Elt ID 0 only. Returns empty string if not found or invalid."""
+    elt = pkt[Dot11Elt] if pkt.haslayer(Dot11Elt) else None
+    while elt and isinstance(elt, Dot11Elt):
+        if elt.ID == 0:
+            raw = elt.info
+            if not raw or len(raw) > 32:
+                return ""
+            try:
+                ssid = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return ""
+            if not ssid or not ssid.isprintable() or "\x00" in ssid:
+                return ""
+            return ssid
+        elt = elt.payload if isinstance(getattr(elt, "payload", None), Dot11Elt) else None
+    return ""
+
+
+def is_valid_ssid(ssid):
+    """Check if an SSID is valid for storage — printable, 1-32 chars, no garbage."""
+    if not ssid or len(ssid) > 32:
+        return False
+    if "\ufffd" in ssid:
+        return False
+    if not ssid.isprintable():
+        return False
+    if "\x00" in ssid:
+        return False
+    alnum = sum(1 for c in ssid if c.isalnum() or c in ' -_.')
+    if len(ssid) > 4 and alnum / len(ssid) < 0.3:
+        return False
+    return True
+
+
 def get_oui(mac):
     return mac[:8].upper()
 
@@ -566,27 +601,6 @@ def get_manufacturer(mac):
 # Packet handler — keeps best RSSI per MAC in current window
 # ---------------------------------------------------------------------------
 
-def clean_ssid(raw_bytes):
-    """Decode SSID bytes and return a clean printable string, or '' if garbage."""
-    if not raw_bytes:
-        return ""
-    try:
-        s = raw_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        try:
-            s = raw_bytes.decode("latin-1")
-        except Exception:
-            return ""
-    # Drop if any character is a control character (except space)
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
-        return ""
-    # Drop if more than half the characters are non-ASCII (likely binary garbage)
-    non_ascii = sum(1 for c in s if ord(c) > 0x7E)
-    if non_ascii > len(s) / 2:
-        return ""
-    return s.strip()
-
-
 def handle_packet(pkt):
     if not pkt.haslayer(Dot11):
         return
@@ -601,13 +615,13 @@ def handle_packet(pkt):
     if pkt.haslayer(Dot11Beacon):
         mac         = pkt[Dot11].addr3
         device_type = "AP"
-        ssid        = clean_ssid(pkt[Dot11Elt].info) if pkt.haslayer(Dot11Elt) else ""
+        ssid        = get_ssid(pkt)
         channel     = get_channel(pkt)
         ht, vht, he, vendor_ouis = get_caps_and_vendors(pkt)
     elif pkt.haslayer(Dot11ProbeReq):
         mac         = pkt[Dot11].addr2
         device_type = "Client"
-        ssid        = clean_ssid(pkt[Dot11Elt].info) if pkt.haslayer(Dot11Elt) else ""
+        ssid        = get_ssid(pkt)
         ht, vht, he, vendor_ouis = get_caps_and_vendors(pkt)
 
     if not mac or mac == "ff:ff:ff:ff:ff:ff":
@@ -724,7 +738,7 @@ def write_snapshot(snap, gps, ts):
             ))
 
             for ssid in s.get("ssids", set()):
-                if ssid:
+                if is_valid_ssid(ssid):
                     cur.execute(
                         "INSERT OR IGNORE INTO ssids (mac, ssid, first_seen) VALUES (?, ?, ?)",
                         (mac, ssid, ts_str)

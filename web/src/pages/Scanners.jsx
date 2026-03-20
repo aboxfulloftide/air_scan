@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
-import { Radio, MapPin, Pencil, Check, X } from 'lucide-react'
+import { Radio, MapPin, Pencil, Check, X, Trash2 } from 'lucide-react'
 import DeployTargets from '../components/DeployTargets'
 import MaintenanceSettings from '../components/MaintenanceSettings'
 
@@ -35,6 +35,17 @@ export default function Scanners() {
       setEditing(null)
     },
   })
+
+  const deleteScanner = useMutation({
+    mutationFn: (id) => api.delete(`/scanners/${id}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['scanners'] }),
+  })
+
+  const confirmDelete = (s) => {
+    if (window.confirm(`Delete scanner "${s.label || s.hostname}"?`)) {
+      deleteScanner.mutate(s.id)
+    }
+  }
 
   const startEdit = (s) => {
     setEditing(s.id)
@@ -86,7 +97,14 @@ export default function Scanners() {
                   <p className="text-xs text-gray-500 font-mono">{s.hostname}</p>
                 </div>
               </div>
-              <span className={`text-sm ${healthColor[s.health]}`}>{s.health}</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-sm ${healthColor[s.health]}`}>{s.health}</span>
+                {s.health === 'offline' && (
+                  <button onClick={() => confirmDelete(s)} className="text-gray-600 hover:text-red-400 transition-colors" title="Delete scanner">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-y-2 text-sm">

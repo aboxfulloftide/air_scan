@@ -247,12 +247,11 @@ static bool wifi_connect() {
 }
 
 static void wifi_disconnect_and_resume() {
-    // Full stop/start cycle so the WiFi driver gives promiscuous mode a clean slate.
-    // disconnect(false) leaves the driver in a partial STA state where promiscuous
-    // mode silently stops delivering packets after the first flush.
-    WiFi.disconnect(true);   // calls esp_wifi_stop() — full shutdown
+    // Full stop+restart is needed — WiFi.disconnect(false) leaves the driver
+    // in a state where promiscuous mode silently receives nothing.
+    WiFi.disconnect(true);   // calls esp_wifi_stop()
     delay(100);
-    WiFi.mode(WIFI_STA);     // calls esp_wifi_start() — clean restart
+    WiFi.mode(WIFI_STA);     // calls esp_wifi_start() internally
     delay(100);
 
     esp_err_t err = esp_wifi_set_promiscuous(true);
@@ -261,6 +260,7 @@ static void wifi_disconnect_and_resume() {
     }
     esp_wifi_set_promiscuous_rx_cb(pkt_callback);
     esp_wifi_set_channel(current_channel, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("[PROMISC] Resumed on channel %d\n", current_channel);
 }
 
 // ── NTP sync ──────────────────────────────────────────────────────────────────

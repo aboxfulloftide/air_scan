@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
@@ -11,6 +11,7 @@ from api.deploy.router import router as deploy_router
 from api.maintenance.router import router as maintenance_router
 from api.observations.router import router as observations_router
 from api.firmware.router import router as firmware_router
+from api.mobile.router import router as mobile_router
 
 app = FastAPI(title="Air Scan", version="0.1.0")
 
@@ -22,6 +23,7 @@ app.include_router(deploy_router)
 app.include_router(maintenance_router)
 app.include_router(observations_router)
 app.include_router(firmware_router)
+app.include_router(mobile_router)
 
 # Serve built frontend from static/
 static_dir = Path(__file__).resolve().parent.parent / "static"
@@ -30,6 +32,8 @@ if static_dir.exists():
 
     @app.get("/{path:path}")
     async def serve_spa(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
         file = static_dir / path
         if file.exists() and file.is_file():
             return FileResponse(file)

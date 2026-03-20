@@ -44,3 +44,11 @@ async def update_scanner(scanner_id: int, body: dict, db: AsyncSession = Depends
     )
     await db.commit()
     return {"ok": True}
+
+
+@router.delete("/{scanner_id}")
+async def delete_scanner(scanner_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete a scanner entry."""
+    await db.execute(text("DELETE FROM scanners WHERE id = :id"), {"id": scanner_id})
+    await db.commit()
+    return {"ok": True}

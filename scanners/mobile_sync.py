@@ -228,7 +228,7 @@ def sync(sqlite_path, dry_run=False):
         ))
 
         for ssid, first_seen in ssids_by_mac.get(mac, []):
-            if ssid:
+            if ssid and len(ssid) <= 32 and ssid.isprintable() and "\ufffd" not in ssid and "\x00" not in ssid:
                 cur.execute(
                     "INSERT IGNORE INTO ssids (mac, ssid, first_seen) VALUES (%s, %s, %s)",
                     (mac, ssid, first_seen)

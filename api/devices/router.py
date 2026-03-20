@@ -159,6 +159,7 @@ async def list_devices(
             SELECT mac, GROUP_CONCAT(DISTINCT ssid ORDER BY ssid SEPARATOR ', ') as ssids
             FROM ssids
             WHERE mac IN ({placeholders})
+              AND ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(ssid) BETWEEN 1 AND 32
             GROUP BY mac
         """), ssid_params)
         ssids_by_mac = {row["mac"]: row["ssids"] for row in r2.mappings().all()}
@@ -191,7 +192,7 @@ async def get_device(mac: str, db: AsyncSession = Depends(get_db)):
 
     # SSIDs
     r2 = await db.execute(text(
-        "SELECT ssid, first_seen FROM ssids WHERE mac = :mac ORDER BY first_seen"
+        "SELECT ssid, first_seen FROM ssids WHERE mac = :mac AND ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(ssid) BETWEEN 1 AND 32 ORDER BY first_seen"
     ), {"mac": mac})
     ssids = [dict(r) for r in r2.mappings().all()]
 

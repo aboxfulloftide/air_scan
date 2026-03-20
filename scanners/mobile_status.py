@@ -346,7 +346,7 @@ def query_status():
                 GROUP_CONCAT(DISTINCT s.ssid) AS ssids
             FROM observations o
             LEFT JOIN devices d ON d.mac = o.mac
-            LEFT JOIN ssids   s ON s.mac = o.mac
+            LEFT JOIN ssids   s ON s.mac = o.mac AND LENGTH(s.ssid) BETWEEN 1 AND 32
             WHERE o.recorded_at >= datetime('now', '-60 seconds')
             GROUP BY o.mac
             ORDER BY o.recorded_at DESC

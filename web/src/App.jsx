@@ -5,6 +5,7 @@ import Devices from './pages/Devices'
 import DeviceDetail from './pages/DeviceDetail'
 import MapView from './pages/MapView'
 import Scanners from './pages/Scanners'
+import MobileMap from './pages/MobileMap'
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/devices" element={<Devices />} />
         <Route path="/devices/:mac" element={<DeviceDetail />} />
         <Route path="/map" element={<MapView />} />
+        <Route path="/mobile" element={<MobileMap />} />
         <Route path="/scanners" element={<Scanners />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

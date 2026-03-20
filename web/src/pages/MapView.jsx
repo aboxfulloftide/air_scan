@@ -133,16 +133,51 @@ function ZoomTracker({ onZoomChange }) {
   return null
 }
 
-function AutoTileLayer({ zoom }) {
-  // Satellite imagery gets blurry past zoom 19; switch to street tiles
-  if (zoom >= 19) {
+const TILE_PROVIDERS = {
+  google:  { label: 'Google',  url: 'https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', maxNative: 21, attr: 'Imagery &copy; Google' },
+  bing:    { label: 'Bing',    url: 'https://ecn.t{s}.tiles.virtualearth.net/tiles/a{q}?g=1&n=z', maxNative: 20, attr: 'Imagery &copy; Microsoft', subdomains: '0123', isBing: true },
+}
+
+// Bing uses a quadkey tile addressing scheme
+function BingTileLayer({ provider }) {
+  const map = useMap()
+  const layerRef = useRef(null)
+
+  useEffect(() => {
+    const BingLayer = L.TileLayer.extend({
+      getTileUrl(coords) {
+        const z = coords.z
+        let quadkey = ''
+        for (let i = z; i > 0; i--) {
+          let digit = 0
+          const mask = 1 << (i - 1)
+          if ((coords.x & mask) !== 0) digit++
+          if ((coords.y & mask) !== 0) digit += 2
+          quadkey += digit
+        }
+        return `https://ecn.t${(coords.x + coords.y) % 4}.tiles.virtualearth.net/tiles/a${quadkey}?g=1&n=z`
+      },
+    })
+    const layer = new BingLayer('', { maxZoom: 22, maxNativeZoom: provider.maxNative, attribution: provider.attr })
+    layer.addTo(map)
+    layerRef.current = layer
+    return () => { map.removeLayer(layer) }
+  }, [map, provider])
+
+  return null
+}
+
+function AutoTileLayer({ zoom, provider }) {
+  // Satellite imagery gets blurry past maxNativeZoom; switch to street tiles
+  const p = TILE_PROVIDERS[provider] || TILE_PROVIDERS.google
+  if (zoom > p.maxNative) {
     return <TileLayer key="street" attribution='&copy; OpenStreetMap'
       url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       maxZoom={22} maxNativeZoom={19} />
   }
-  return <TileLayer key="satellite" attribution='Imagery &copy; Esri'
-    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-    maxZoom={22} maxNativeZoom={20} />
+  if (p.isBing) return <BingTileLayer key="bing" provider={p} />
+  return <TileLayer key={`sat-${provider}`} attribution={p.attr}
+    url={p.url} maxZoom={22} maxNativeZoom={p.maxNative} />
 }
 
 function FloorPane() {
@@ -253,6 +288,7 @@ export default function MapView() {
   // Zoom tracking for auto tile switch + label visibility
   const [zoom, setZoom] = useState(20)
   const handleZoomChange = useCallback((z) => setZoom(z), [])
+  const [tileProvider, setTileProvider] = useState('google')
 
   // Drawing state
   const [drawMode, setDrawMode] = useState('select') // 'select' | 'wall_line' | 'wall_freehand' | 'floor_zone'
@@ -454,7 +490,17 @@ export default function MapView() {
   return (
     <div className="p-6 space-y-3 h-full flex flex-col">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-bold text-white">Map</h2>
+        <div className="flex items-center gap-4">
+          <h2 className="text-xl font-bold text-white">Map</h2>
+          <div className="flex bg-gray-800 rounded-lg p-0.5 text-xs">
+            {Object.entries(TILE_PROVIDERS).map(([key, p]) => (
+              <button key={key} onClick={() => setTileProvider(key)}
+                className={`px-2.5 py-1 rounded-md transition-colors ${tileProvider === key ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="flex gap-2">
           {placementMode === 'idle' && !isDrawing && (
             <>
@@ -585,7 +631,7 @@ export default function MapView() {
         <MapContainer center={center} zoom={mapConfig?.gps_anchor_lat ? 20 : 4}
           maxZoom={22} doubleClickZoom={false}
           className="h-full w-full" style={{ background: '#1a1a2e' }}>
-          <AutoTileLayer zoom={zoom} />
+          <AutoTileLayer zoom={zoom} provider={tileProvider} />
           <ZoomTracker onZoomChange={handleZoomChange} />
 
           <LayersControl position="topright">

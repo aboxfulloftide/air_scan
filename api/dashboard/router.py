@@ -60,7 +60,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         FROM ssids s
         JOIN devices d ON d.mac = s.mac
         WHERE d.last_seen >= NOW() - INTERVAL 24 HOUR
-        AND s.ssid != ''
+        AND s.ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(s.ssid) BETWEEN 1 AND 32
         GROUP BY s.ssid
         ORDER BY device_count DESC
         LIMIT 10

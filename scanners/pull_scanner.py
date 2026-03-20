@@ -106,6 +106,41 @@ def get_manufacturer(mac):
         return m if m else None
     except: return None
 
+def get_ssid(pkt):
+    """Extract SSID from Dot11Elt ID 0 only. Returns empty string if not found or invalid."""
+    elt = pkt[Dot11Elt] if pkt.haslayer(Dot11Elt) else None
+    while elt and isinstance(elt, Dot11Elt):
+        if elt.ID == 0:
+            raw = elt.info
+            if not raw or len(raw) > 32:
+                return ""
+            try:
+                ssid = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return ""
+            if not ssid or not ssid.isprintable() or "\x00" in ssid:
+                return ""
+            return ssid
+        elt = elt.payload if isinstance(getattr(elt, "payload", None), Dot11Elt) else None
+    return ""
+
+
+def is_valid_ssid(ssid):
+    """Check if an SSID is valid for storage — printable, 1-32 chars, no garbage."""
+    if not ssid or len(ssid) > 32:
+        return False
+    if "\ufffd" in ssid:
+        return False
+    if not ssid.isprintable():
+        return False
+    if "\x00" in ssid:
+        return False
+    alnum = sum(1 for c in ssid if c.isalnum() or c in ' -_.')
+    if len(ssid) > 4 and alnum / len(ssid) < 0.3:
+        return False
+    return True
+
+
 def freq_to_flags(freq):
     """Derive channel flags from frequency when RadioTap doesn't provide them."""
     if not freq:
@@ -215,7 +250,7 @@ def parse_pcap_file(filepath):
         if pkt.haslayer(Dot11Beacon):
             mac = pkt[Dot11].addr3
             device_type = "AP"
-            ssid = pkt[Dot11Elt].info.decode(errors="replace") if pkt.haslayer(Dot11Elt) else ""
+            ssid = get_ssid(pkt)
             # Get channel from DS Parameter Set (IE 3)
             elt = pkt[Dot11Elt] if pkt.haslayer(Dot11Elt) else None
             while elt and isinstance(elt, Dot11Elt):
@@ -226,7 +261,7 @@ def parse_pcap_file(filepath):
         elif pkt.haslayer(Dot11ProbeReq):
             mac = pkt[Dot11].addr2
             device_type = "Client"
-            ssid = pkt[Dot11Elt].info.decode(errors="replace") if pkt.haslayer(Dot11Elt) else ""
+            ssid = get_ssid(pkt)
 
         if not mac or mac == "ff:ff:ff:ff:ff:ff" or mac in IGNORE_MACS:
             continue
@@ -426,7 +461,7 @@ def flush_to_db(observations):
                   int(d["ht"]), int(d["vht"]), int(d["he"]), d["first_seen"], d["last_seen"]))
 
             for ssid in d["ssids"]:
-                if ssid:
+                if is_valid_ssid(ssid):
                     cur.execute("""
                         INSERT IGNORE INTO ssids (mac, ssid, first_seen) VALUES (%s, %s, %s)
                     """, (mac, ssid, d["first_seen"]))

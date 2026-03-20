@@ -107,7 +107,7 @@ async def get_computed_positions(db: AsyncSession = Depends(get_db)):
         FROM device_positions dp
         JOIN devices d ON d.mac = dp.mac
         LEFT JOIN known_devices kd ON kd.mac = dp.mac
-        LEFT JOIN ssids s ON s.mac = dp.mac
+        LEFT JOIN ssids s ON s.mac = dp.mac AND s.ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(s.ssid) BETWEEN 1 AND 32
         WHERE dp.method NOT IN ('manual', 'fixed')
           AND dp.computed_at >= NOW() - INTERVAL 5 MINUTE
           AND dp.id IN (
@@ -154,7 +154,7 @@ async def list_placed_aps(db: AsyncSession = Depends(get_db)):
                GROUP_CONCAT(DISTINCT s.ssid ORDER BY s.ssid SEPARATOR ', ') as ssids
         FROM device_positions dp
         JOIN devices d ON d.mac = dp.mac
-        LEFT JOIN ssids s ON s.mac = dp.mac
+        LEFT JOIN ssids s ON s.mac = dp.mac AND s.ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(s.ssid) BETWEEN 1 AND 32
         WHERE dp.method = 'manual'
         AND dp.id IN (
             SELECT MAX(id) FROM device_positions
@@ -186,7 +186,7 @@ async def list_fixed_devices(db: AsyncSession = Depends(get_db)):
                GROUP_CONCAT(DISTINCT s.ssid ORDER BY s.ssid SEPARATOR ', ') as ssids
         FROM known_devices kd
         JOIN devices d ON d.mac = kd.mac
-        LEFT JOIN ssids s ON s.mac = kd.mac
+        LEFT JOIN ssids s ON s.mac = kd.mac AND s.ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(s.ssid) BETWEEN 1 AND 32
         WHERE kd.is_fixed = TRUE
         GROUP BY COALESCE(CONCAT('host:', kd.port_scan_host_id), CONCAT('mac:', kd.mac))
         ORDER BY COALESCE(MAX(kd.label), MAX(d.manufacturer), MIN(kd.mac))
@@ -201,7 +201,7 @@ async def search_aps(q: str = "", db: AsyncSession = Depends(get_db)):
         SELECT d.mac, d.manufacturer, d.oui,
                GROUP_CONCAT(DISTINCT s.ssid ORDER BY s.ssid SEPARATOR ', ') as ssids
         FROM devices d
-        LEFT JOIN ssids s ON s.mac = d.mac
+        LEFT JOIN ssids s ON s.mac = d.mac AND s.ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(s.ssid) BETWEEN 1 AND 32
         WHERE d.device_type = 'AP'
         AND (d.mac LIKE :q OR d.manufacturer LIKE :q OR s.ssid LIKE :q)
         GROUP BY d.mac, d.manufacturer, d.oui
@@ -225,7 +225,7 @@ async def search_devices(q: str = "", db: AsyncSession = Depends(get_db)):
                    GROUP_CONCAT(DISTINCT s.ssid ORDER BY s.ssid SEPARATOR ', ') as ssids
             FROM devices d
             LEFT JOIN known_devices kd ON kd.mac = d.mac
-            LEFT JOIN ssids s ON s.mac = d.mac
+            LEFT JOIN ssids s ON s.mac = d.mac AND s.ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(s.ssid) BETWEEN 1 AND 32
             WHERE d.mac = :mac
             GROUP BY d.mac, d.device_type, d.manufacturer, d.last_seen,
                      kd.port_scan_host_id, kd.label, kd.owner, kd.status, kd.is_fixed
@@ -239,7 +239,7 @@ async def search_devices(q: str = "", db: AsyncSession = Depends(get_db)):
                    GROUP_CONCAT(DISTINCT s.ssid ORDER BY s.ssid SEPARATOR ', ') as ssids
             FROM devices d
             LEFT JOIN known_devices kd ON kd.mac = d.mac
-            LEFT JOIN ssids s ON s.mac = d.mac
+            LEFT JOIN ssids s ON s.mac = d.mac AND s.ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(s.ssid) BETWEEN 1 AND 32
             WHERE (
                 d.mac LIKE :q OR
                 d.manufacturer LIKE :q OR
