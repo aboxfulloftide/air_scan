@@ -1,0 +1,20 @@
+[Unit]
+Description=Mobile BLE scanner (recording)
+After=network.target bluetooth.service hciuart.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/matheau/air_scan
+
+ExecStartPre=/usr/sbin/rfkill unblock bluetooth
+ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/mobile_ble_scanner.py
+
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

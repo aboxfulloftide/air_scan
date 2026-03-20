@@ -1,0 +1,17 @@
+[Unit]
+Description=Mobile BLE scanner (test mode — no recording)
+After=bluetooth.service hciuart.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/matheau/air_scan
+
+ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/mobile_ble_scanner.py --no-record
+
+Restart=no
+
+StandardOutput=journal
+StandardError=journal
+
+# No [Install] section — never enable at boot, always started manually

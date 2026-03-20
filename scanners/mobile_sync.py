@@ -132,7 +132,13 @@ def sync(sqlite_path, dry_run=False):
 
     # Pull unsynced observations with their device data
     # session_id stored as "hostname:started_at" for traceability
-    rows = src.execute("""
+    # Detect whether BLE columns exist in this SQLite DB (added by migrate_010)
+    obs_cols = {row[1] for row in src.execute("PRAGMA table_info(observations)")}
+    has_ble_cols = "manufacturer_data" in obs_cols
+
+    ble_select = ", o.manufacturer_data, o.adv_services, o.tx_power" if has_ble_cols else ", NULL, NULL, NULL"
+
+    rows = src.execute(f"""
         SELECT
             o.id        AS obs_id,
             (s.scanner_host || ':' || s.started_at) AS session_id,
@@ -146,7 +152,7 @@ def sync(sqlite_path, dry_run=False):
             o.gps_lat,
             o.gps_lon,
             o.gps_fix,
-            o.recorded_at,
+            o.recorded_at{ble_select},
             d.device_type,
             d.oui,
             d.manufacturer,
@@ -246,6 +252,7 @@ def sync(sqlite_path, dry_run=False):
             row["signal_dbm"], row["channel"], row["freq_mhz"], row["channel_flags"],
             row["gps_lat"], row["gps_lon"], row["gps_fix"],
             row["session_id"], row["recorded_at"],
+            row["manufacturer_data"], row["adv_services"], row["tx_power"],
         ))
         obs_synced.append(row["obs_id"])
 
@@ -254,8 +261,9 @@ def sync(sqlite_path, dry_run=False):
                 INSERT INTO mobile_observations
                     (mac, interface, scanner_host, signal_dbm, channel,
                      freq_mhz, channel_flags, gps_lat, gps_lon, gps_fix,
-                     session_id, recorded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     session_id, recorded_at,
+                     manufacturer_data, adv_services, tx_power)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, obs_batch)
             dst.commit()
             total_written += len(obs_batch)
@@ -267,8 +275,9 @@ def sync(sqlite_path, dry_run=False):
             INSERT INTO mobile_observations
                 (mac, interface, scanner_host, signal_dbm, channel,
                  freq_mhz, channel_flags, gps_lat, gps_lon, gps_fix,
-                 session_id, recorded_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 session_id, recorded_at,
+                 manufacturer_data, adv_services, tx_power)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, obs_batch)
         dst.commit()
         total_written += len(obs_batch)

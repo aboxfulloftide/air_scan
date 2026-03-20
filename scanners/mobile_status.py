@@ -243,6 +243,46 @@ def _download_worker(bbox, min_zoom, max_zoom, region_name):
             _dl_state["running"] = False
 
 
+# ---------------------------------------------------------------------------
+# Sync state + worker
+# ---------------------------------------------------------------------------
+
+_sync_state = {"running": False, "done": False, "ok": None, "output": "", "error": None}
+_sync_lock   = threading.Lock()
+
+
+def run_sync():
+    with _sync_lock:
+        if _sync_state["running"]:
+            return False, "sync already in progress"
+        _sync_state.update({"running": True, "done": False, "ok": None, "output": "", "error": None})
+
+    def worker():
+        try:
+            r = subprocess.run(
+                [sys.executable, str(Path(__file__).parent / "mobile_sync.py")],
+                capture_output=True, text=True, timeout=180,
+            )
+            with _sync_lock:
+                _sync_state["ok"]     = r.returncode in (0, 1)  # 1 = soft fail (no MySQL)
+                _sync_state["output"] = (r.stdout + r.stderr).strip()
+        except subprocess.TimeoutExpired:
+            with _sync_lock:
+                _sync_state["ok"] = False
+                _sync_state["error"] = "timed out after 180 s"
+        except Exception as e:
+            with _sync_lock:
+                _sync_state["ok"] = False
+                _sync_state["error"] = str(e)
+        finally:
+            with _sync_lock:
+                _sync_state["running"] = False
+                _sync_state["done"]    = True
+
+    threading.Thread(target=worker, daemon=True).start()
+    return True, "started"
+
+
 def start_download(region_name, bbox, min_zoom=10, max_zoom=14):
     with _dl_lock:
         if _dl_state["running"]:
@@ -351,21 +391,37 @@ def query_status():
                 "total_obs":  session_row["total_obs"],
             }
 
+        # DB-wide totals
+        stats_row = conn.execute("""
+            SELECT
+                COUNT(*)                                               AS total_obs,
+                COUNT(DISTINCT mac)                                    AS total_devices,
+                SUM(CASE WHEN synced = 0 THEN 1 ELSE 0 END)           AS unsynced
+            FROM observations
+        """).fetchone()
+        dbstats = {
+            "total_obs":      stats_row["total_obs"]      or 0,
+            "total_devices":  stats_row["total_devices"]  or 0,
+            "unsynced":       stats_row["unsynced"]        or 0,
+        }
+
         conn.close()
-        return {"gps": gps, "wifi": wifi, "session": session,
+        return {"gps": gps, "wifi": wifi, "session": session, "dbstats": dbstats,
                 "scanner": scanner_status(), "sysTime": system_time_info(),
                 "ignore": load_ignore(), "error": None}
 
     except Exception as e:
         return {"error": str(e), "gps": None, "wifi": [], "session": None,
+                "dbstats": {"total_obs": 0, "total_devices": 0, "unsynced": 0},
                 "scanner": scanner_status(), "sysTime": system_time_info(),
                 "ignore": load_ignore()}
 
 
 def scanner_status():
-    """Return active/inactive state for both scanner services."""
+    """Return active/inactive state for all scanner services."""
     result = {}
-    for svc in ("mobile-scanner", "mobile-scanner-test"):
+    for svc in ("mobile-scanner", "mobile-scanner-test",
+                "mobile-ble-scanner", "mobile-ble-scanner-test"):
         r = subprocess.run(
             ["systemctl", "is-active", svc],
             capture_output=True, text=True
@@ -803,6 +859,36 @@ HTML = """<!DOCTYPE html>
   }
   .dl-status { font-size: 11px; color: var(--muted); min-height: 14px; }
   .leaflet-control-attribution { font-size: 9px !important; }
+  /* DB stats */
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .stat-row:last-of-type { border-bottom: none; }
+  .stat-label { color: var(--muted); }
+  .stat-value { font-family: var(--mono); font-weight: 600; }
+  .stat-unsynced { color: var(--yellow); }
+  .stat-synced   { color: var(--green); }
+  .push-btn {
+    width: 100%;
+    margin-top: 12px;
+    padding: 10px;
+    background: rgba(75,158,245,0.12);
+    color: var(--blue);
+    border: 1px solid rgba(75,158,245,0.3);
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .push-btn:active   { opacity: 0.7; }
+  .push-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .push-msg { font-size: 12px; margin-top: 8px; min-height: 16px; }
   /* Ignore list */
   /* Action sheet (tap on WiFi row) */
   .action-overlay {
@@ -984,7 +1070,7 @@ HTML = """<!DOCTYPE html>
   </div>
   <div class="scanner-row">
     <div>
-      <div class="scanner-label">Test mode</div>
+      <div class="scanner-label">WiFi test mode</div>
       <div class="scanner-sublabel">Scan only, no recording</div>
     </div>
     <div class="scanner-right">
@@ -993,6 +1079,46 @@ HTML = """<!DOCTYPE html>
       <button class="svc-btn svc-btn-stop"  id="btn-test-stop"  onclick="svcAction('mobile-scanner-test','stop')">Stop</button>
     </div>
   </div>
+  <div class="scanner-row">
+    <div>
+      <div class="scanner-label">BLE Recording</div>
+      <div class="scanner-sublabel">Passive BLE advertisement scan</div>
+    </div>
+    <div class="scanner-right">
+      <span class="svc-badge svc-inactive" id="badge-ble">—</span>
+      <button class="svc-btn svc-btn-start" id="btn-ble-start" onclick="svcAction('mobile-ble-scanner','start')">Start</button>
+      <button class="svc-btn svc-btn-stop"  id="btn-ble-stop"  onclick="svcAction('mobile-ble-scanner','stop')">Stop</button>
+    </div>
+  </div>
+  <div class="scanner-row">
+    <div>
+      <div class="scanner-label">BLE test mode</div>
+      <div class="scanner-sublabel">Scan only, no recording</div>
+    </div>
+    <div class="scanner-right">
+      <span class="svc-badge svc-inactive" id="badge-ble-test">—</span>
+      <button class="svc-btn svc-btn-start" id="btn-ble-test-start" onclick="svcAction('mobile-ble-scanner-test','start')">Start</button>
+      <button class="svc-btn svc-btn-stop"  id="btn-ble-test-stop"  onclick="svcAction('mobile-ble-scanner-test','stop')">Stop</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Database</div>
+  <div class="stat-row">
+    <span class="stat-label">Total observations</span>
+    <span class="stat-value" id="db-total-obs">—</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Unique devices</span>
+    <span class="stat-value" id="db-total-devices">—</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Unsynced</span>
+    <span class="stat-value" id="db-unsynced">—</span>
+  </div>
+  <button class="push-btn" id="push-btn" onclick="pushToServer()">&#8679; Push to Server</button>
+  <div class="push-msg" id="push-msg"></div>
 </div>
 
 <div class="card">
@@ -1192,6 +1318,9 @@ function render(data) {
   // System time
   renderSysTime(data.sysTime || {});
 
+  // DB stats
+  renderDbStats(data.dbstats || {});
+
   // Scanner controls
   renderScanner(data.scanner || {});
 
@@ -1348,8 +1477,10 @@ async function ignoreRemove(type, value) {
 
 function renderScanner(scanner) {
   const services = [
-    { svc: 'mobile-scanner',      id: 'recording' },
-    { svc: 'mobile-scanner-test', id: 'test'      },
+    { svc: 'mobile-scanner',          id: 'recording' },
+    { svc: 'mobile-scanner-test',     id: 'test'      },
+    { svc: 'mobile-ble-scanner',      id: 'ble'       },
+    { svc: 'mobile-ble-scanner-test', id: 'ble-test'  },
   ];
   for (const { svc, id } of services) {
     const state  = scanner[svc] || 'unknown';
@@ -1368,7 +1499,13 @@ function renderScanner(scanner) {
 
 async function svcAction(svc, action) {
   // Disable both buttons while request is in flight
-  const id    = svc === 'mobile-scanner' ? 'recording' : 'test';
+  const idMap = {
+    'mobile-scanner':          'recording',
+    'mobile-scanner-test':     'test',
+    'mobile-ble-scanner':      'ble',
+    'mobile-ble-scanner-test': 'ble-test',
+  };
+  const id = idMap[svc] || svc;
   const bStart = document.getElementById('btn-' + id + '-start');
   const bStop  = document.getElementById('btn-' + id + '-stop');
   bStart.disabled = true;
@@ -1525,6 +1662,75 @@ window.addEventListener('load', () => {
 poll();
 setInterval(poll, POLL_MS);
 
+// ---------------------------------------------------------------------------
+// DB stats
+// ---------------------------------------------------------------------------
+
+function renderDbStats(s) {
+  const fmt = n => n.toLocaleString();
+  document.getElementById('db-total-obs').textContent     = fmt(s.total_obs     || 0);
+  document.getElementById('db-total-devices').textContent = fmt(s.total_devices || 0);
+  const unsyncedEl = document.getElementById('db-unsynced');
+  const u = s.unsynced || 0;
+  unsyncedEl.textContent  = u > 0 ? fmt(u) : 'all synced';
+  unsyncedEl.className    = 'stat-value ' + (u > 0 ? 'stat-unsynced' : 'stat-synced');
+}
+
+let _pushPollTimer = null;
+
+async function pushToServer() {
+  const btn = document.getElementById('push-btn');
+  const msg = document.getElementById('push-msg');
+  btn.disabled = true;
+  btn.textContent = 'Starting sync…';
+  msg.style.color = 'var(--muted)';
+  msg.textContent = '';
+  try {
+    const resp = await fetch('/api/sync', { method: 'POST' });
+    const data = await resp.json();
+    if (!data.ok) {
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Error: ' + (data.error || 'unknown');
+      btn.disabled = false;
+      btn.textContent = '⇧ Push to Server';
+      return;
+    }
+    btn.textContent = 'Syncing…';
+    msg.style.color = 'var(--muted)';
+    msg.textContent = 'Running mobile_sync.py…';
+    if (_pushPollTimer) clearInterval(_pushPollTimer);
+    _pushPollTimer = setInterval(pollSync, 2000);
+  } catch (e) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = 'Request failed: ' + e;
+    btn.disabled = false;
+    btn.textContent = '⇧ Push to Server';
+  }
+}
+
+async function pollSync() {
+  try {
+    const resp = await fetch('/api/sync/status');
+    const d    = await resp.json();
+    if (!d.running && d.done) {
+      clearInterval(_pushPollTimer);
+      const btn = document.getElementById('push-btn');
+      const msg = document.getElementById('push-msg');
+      btn.disabled    = false;
+      btn.textContent = '⇧ Push to Server';
+      if (d.ok) {
+        msg.style.color = 'var(--green)';
+        const last = (d.output || '').split('\\n').pop();
+        msg.textContent = last || 'Sync complete.';
+      } else {
+        msg.style.color = 'var(--red)';
+        msg.textContent = d.error || (d.output || '').split('\\n').pop() || 'Sync failed.';
+      }
+      poll();  // refresh counts immediately
+    }
+  } catch (e) { /* ignore */ }
+}
+
 async function powerAction(action) {
   const label = action === 'reboot' ? 'Reboot' : 'Shut Down';
   if (!confirm(label + ' the Pi?')) return;
@@ -1548,6 +1754,15 @@ async function powerAction(action) {
     btn.disabled = false;
   }
 }
+
+// Expose all onclick-referenced functions to window so they remain accessible
+// when browser extensions (e.g. MetaMask) sandbox inline scripts via SES.
+Object.assign(window, {
+  toggleTheme, powerAction, svcAction,
+  setTimezone, syncTime, pushToServer,
+  startDownload, regionChanged,
+  actionClose, actionIgnore, onRowTap, ignoreRemove,
+});
 </script>
 <script src="/static/leaflet.js"></script>
 </div><!-- #left-col -->
@@ -1630,6 +1845,9 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif path == "/api/tiles/status":
             with _dl_lock:
                 self.send_json(dict(_dl_state))
+        elif path == "/api/sync/status":
+            with _sync_lock:
+                self.send_json(dict(_sync_state))
         elif path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
@@ -1665,7 +1883,10 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
-        if path == "/api/reboot":
+        if path == "/api/sync":
+            ok, msg = run_sync()
+            self.send_json({"ok": ok, "error": None if ok else msg})
+        elif path == "/api/reboot":
             self.send_json({"ok": True})
             subprocess.Popen(["/usr/sbin/shutdown", "-r", "now"])
         elif path == "/api/shutdown":
@@ -1729,7 +1950,8 @@ class StatusHandler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[4] in ("start", "stop"):
                 svc    = parts[3]
                 action = parts[4]
-                allowed = {"mobile-scanner", "mobile-scanner-test"}
+                allowed = {"mobile-scanner", "mobile-scanner-test",
+                           "mobile-ble-scanner", "mobile-ble-scanner-test"}
                 if svc in allowed:
                     r = subprocess.run(
                         ["systemctl", action, svc],

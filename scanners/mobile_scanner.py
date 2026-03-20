@@ -62,8 +62,9 @@ SCAN_IFACE       = args.iface
 USE_BOTH         = args.both_interfaces   # reserved; onboard not yet activated
 NO_RECORD        = args.no_record
 HOSTNAME         = socket.gethostname()
-SLOT_SECONDS     = 10
-CYCLE_SECONDS    = 60
+SLOT_SECONDS          = 10
+CYCLE_SECONDS         = 60
+SPEED_THRESHOLD_MPS   = 15 * 0.44704   # 15 mph → 2.4 GHz only above this
 DB_FILENAME      = "mobile_scan.db"
 
 if USE_BOTH:
@@ -389,9 +390,10 @@ def get_gps_snapshot():
         stale = (gps_state["last_update"] is None or
                  time.time() - gps_state["last_update"] > 30)
         return {
-            "lat":   gps_state["lat"],
-            "lon":   gps_state["lon"],
-            "fix":   gps_state["fix"] and not stale,
+            "lat":       gps_state["lat"],
+            "lon":       gps_state["lon"],
+            "fix":       gps_state["fix"] and not stale,
+            "speed_mps": gps_state["speed_mps"],
         }
 
 
@@ -564,6 +566,27 @@ def get_manufacturer(mac):
 # Packet handler — keeps best RSSI per MAC in current window
 # ---------------------------------------------------------------------------
 
+def clean_ssid(raw_bytes):
+    """Decode SSID bytes and return a clean printable string, or '' if garbage."""
+    if not raw_bytes:
+        return ""
+    try:
+        s = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            s = raw_bytes.decode("latin-1")
+        except Exception:
+            return ""
+    # Drop if any character is a control character (except space)
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
+        return ""
+    # Drop if more than half the characters are non-ASCII (likely binary garbage)
+    non_ascii = sum(1 for c in s if ord(c) > 0x7E)
+    if non_ascii > len(s) / 2:
+        return ""
+    return s.strip()
+
+
 def handle_packet(pkt):
     if not pkt.haslayer(Dot11):
         return
@@ -578,13 +601,13 @@ def handle_packet(pkt):
     if pkt.haslayer(Dot11Beacon):
         mac         = pkt[Dot11].addr3
         device_type = "AP"
-        ssid        = pkt[Dot11Elt].info.decode(errors="replace") if pkt.haslayer(Dot11Elt) else ""
+        ssid        = clean_ssid(pkt[Dot11Elt].info) if pkt.haslayer(Dot11Elt) else ""
         channel     = get_channel(pkt)
         ht, vht, he, vendor_ouis = get_caps_and_vendors(pkt)
     elif pkt.haslayer(Dot11ProbeReq):
         mac         = pkt[Dot11].addr2
         device_type = "Client"
-        ssid        = pkt[Dot11Elt].info.decode(errors="replace") if pkt.haslayer(Dot11Elt) else ""
+        ssid        = clean_ssid(pkt[Dot11Elt].info) if pkt.haslayer(Dot11Elt) else ""
         ht, vht, he, vendor_ouis = get_caps_and_vendors(pkt)
 
     if not mac or mac == "ff:ff:ff:ff:ff:ff":
@@ -644,9 +667,15 @@ def handle_packet(pkt):
 # Channel hopper
 # ---------------------------------------------------------------------------
 
-def channel_hopper(iface, schedule, slots_per_band):
+def channel_hopper(iface, schedule_dual, spb_dual, schedule_24, spb_24):
     time.sleep(max(0, next_boundary(SLOT_SECONDS) - 0.2))
     while True:
+        with gps_lock:
+            speed = gps_state["speed_mps"] or 0
+        if speed >= SPEED_THRESHOLD_MPS:
+            schedule, slots_per_band = schedule_24, spb_24
+        else:
+            schedule, slots_per_band = schedule_dual, spb_dual
         band, freq = get_target_freq(time.time(), schedule, slots_per_band)
         ok = set_freq(iface, freq)
         with scan_lock:
@@ -737,10 +766,14 @@ def snapshot_thread():
 
         gps_str = (f"{gps['lat']:.6f},{gps['lon']:.6f}" if gps["lat"] else "no fix")
         fix_marker = "" if gps["fix"] else " (stale)"
+        speed_mps = gps["speed_mps"] or 0
+        speed_mph = speed_mps * 2.23694
+        speed_str = f"{speed_mph:.1f}mph"
+        band_mode = "2.4only" if speed_mps >= SPEED_THRESHOLD_MPS else "dual"
         print(
             f"\r[{ts.strftime('%H:%M:%S')} UTC]  "
-            f"{current_band['band']}GHz @ {current_band['freq']}MHz  |  "
-            f"GPS: {gps_str}{fix_marker}  |  "
+            f"{current_band['band']}GHz @ {current_band['freq']}MHz [{band_mode}]  |  "
+            f"GPS: {gps_str}{fix_marker} {speed_str}  |  "
             f"Window: {len(snap)}  Total: {len(seen)}   ",
             end="", flush=True
         )
@@ -769,19 +802,21 @@ if __name__ == "__main__":
     print(f"Session ID      : {SESSION_ID}")
 
     bands          = detect_supported_bands(SCAN_IFACE)
-    slots_per_band = (CYCLE_SECONDS // SLOT_SECONDS) // len(bands)
-    schedule       = build_schedule(bands)
+    schedule_dual  = build_schedule(bands)
+    spb_dual       = (CYCLE_SECONDS // SLOT_SECONDS) // len(bands)
+    schedule_24    = build_schedule(["2.4"])
+    spb_24         = (CYCLE_SECONDS // SLOT_SECONDS) // 1
 
-    print(f"Bands           : {', '.join(b + 'GHz' for b in bands)}  ({slots_per_band * SLOT_SECONDS}s per band)")
+    print(f"Bands           : {', '.join(b + 'GHz' for b in bands)}  (speed < 15mph: dual, >= 15mph: 2.4GHz only)")
     print(f"All times UTC — Ctrl+C to stop\n")
 
-    band0, freq0 = get_target_freq(time.time(), schedule, slots_per_band)
+    band0, freq0 = get_target_freq(time.time(), schedule_dual, spb_dual)
     set_freq(SCAN_IFACE, freq0)
     current_band["band"] = band0
     current_band["freq"] = freq0
 
     threading.Thread(target=gps_reader,    daemon=True).start()
-    threading.Thread(target=channel_hopper, args=(SCAN_IFACE, schedule, slots_per_band), daemon=True).start()
+    threading.Thread(target=channel_hopper, args=(SCAN_IFACE, schedule_dual, spb_dual, schedule_24, spb_24), daemon=True).start()
     threading.Thread(target=snapshot_thread, daemon=True).start()
 
     sniff(iface=SCAN_IFACE, prn=handle_packet, store=False)
