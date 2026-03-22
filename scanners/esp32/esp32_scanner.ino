@@ -28,6 +28,26 @@
  * esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO) must be called after WiFi init
  * or the radio silently ignores 5 GHz channel calls and then stops receiving
  * on 2.4 GHz too. See wifi_disconnect_and_resume().
+ *
+ * ── Changelog ────────────────────────────────────────────────────────────────
+ * v1.1.2 — 2026-03-22
+ *   Fix: serialize JSON into a static char buffer and call doc.clear() before
+ *   opening the HTTP connection. Previously DynamicJsonDocument (40KB) and
+ *   String payload (~30KB) were live simultaneously, causing heap fragmentation
+ *   that crashed the device after ~8 hours. Peak heap is now ~40KB instead of
+ *   ~70KB, and the static buffer doesn't fragment the allocator.
+ *
+ * v1.1.1 — 2026-03-19
+ *   Fix: esp_wifi_set_promiscuous_rx_cb() must be re-called inside the
+ *   band-change block of hop_channel(). On ESP32-C5, toggling promiscuous
+ *   mode (false→true) during a 2.4↔5 GHz band hop silently clears the RX
+ *   callback. Symptom: live:0 buf:0 permanently after the first band switch
+ *   (~30s into operation). Device never flushes to API.
+ *
+ * v1.1.0 — 2026-03-17
+ *   Add dual-band 2.4+5 GHz scanning (ESP32-C5). Add health stats, bench
+ *   timing, NTP throttle. Fix: re-register promiscuous RX callback inside
+ *   wifi_disconnect_and_resume() — WiFi mode cycling (NULL→STA) clears it.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -260,10 +280,12 @@ static void hop_channel(time_t now) {
     if (ch != current_channel) {
         bool band_change = (ch >= 36) != (current_channel >= 36);
         if (band_change) {
-            // Radio needs promiscuous restart when crossing bands on ESP32-C5
+            // Radio needs promiscuous restart when crossing bands on ESP32-C5.
+            // Must re-register callback — toggling promiscuous clears it on C5.
             esp_wifi_set_promiscuous(false);
             esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
             esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+            esp_wifi_set_promiscuous_rx_cb(pkt_callback);
             esp_wifi_set_promiscuous(true);
         } else {
             esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
@@ -449,8 +471,13 @@ static void flush_to_api() {
         obj["recorded_at"] = ts_str;
     }
 
-    String payload;
-    serializeJson(doc, payload);
+    // Serialize into a static buffer (BSS, not heap) then free the doc before
+    // opening the HTTP connection. This halves peak heap usage (~40KB → ~40KB
+    // instead of doc + String simultaneously) and prevents fragmentation-induced
+    // crash after several hours of operation.
+    static char json_buf[40960];
+    size_t json_len = serializeJson(doc, json_buf, sizeof(json_buf));
+    doc.clear();  // free 40KB heap before HTTP connect
 
     unsigned long t_json = millis();
 
@@ -460,7 +487,7 @@ static void flush_to_api() {
     http.addHeader("Content-Type", "application/json");
     http.setTimeout(10000);
 
-    int code = http.POST(payload);
+    int code = http.POST((uint8_t *)json_buf, json_len);
 
     unsigned long t_post = millis();
     Serial.printf("[BENCH] wifi+ntp=%lums  json=%lums  post=%lums  total=%lums\n",
