@@ -491,6 +491,9 @@ live         = {}   # mac -> best observation in current window
 seen         = {}   # mac -> device metadata (persists across windows)
 current_band = {"band": "?", "freq": 0}
 
+last_packet_time = {"t": time.time()}   # updated on every received packet
+STALL_TIMEOUT = 30   # seconds without a packet before we reset the interface
+
 
 # ---------------------------------------------------------------------------
 # Packet parsing helpers
@@ -601,7 +604,51 @@ def get_manufacturer(mac):
 # Packet handler — keeps best RSSI per MAC in current window
 # ---------------------------------------------------------------------------
 
+def clean_ssid(raw_bytes):
+    """Decode SSID bytes and return a clean printable string, or '' if garbage."""
+    if not raw_bytes:
+        return ""
+    try:
+        s = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            s = raw_bytes.decode("latin-1")
+        except Exception:
+            return ""
+    # Drop if any character is a control character (except space)
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
+        return ""
+    # Drop if more than half the characters are non-ASCII (likely binary garbage)
+    non_ascii = sum(1 for c in s if ord(c) > 0x7E)
+    if non_ascii > len(s) / 2:
+        return ""
+    return s.strip()
+
+
+def reset_monitor(iface):
+    """Cycle interface back into monitor mode after a stall."""
+    subprocess.run(["ip", "link", "set", iface, "down"],  capture_output=True)
+    subprocess.run(["iw", "dev", iface, "set", "type", "monitor"], capture_output=True)
+    subprocess.run(["ip", "link", "set", iface, "up"],    capture_output=True)
+    freq = current_band.get("freq")
+    if freq:
+        subprocess.run(["iw", "dev", iface, "set", "freq", str(freq)], capture_output=True)
+
+
+def watchdog(iface):
+    """Restart monitor mode if no packets received for STALL_TIMEOUT seconds."""
+    while True:
+        time.sleep(STALL_TIMEOUT)
+        elapsed = time.time() - last_packet_time["t"]
+        if elapsed >= STALL_TIMEOUT:
+            print(f"\n[WATCHDOG] No packets for {elapsed:.0f}s — resetting {iface} monitor mode")
+            reset_monitor(iface)
+            last_packet_time["t"] = time.time()
+
+
+
 def handle_packet(pkt):
+    last_packet_time["t"] = time.time()
     if not pkt.haslayer(Dot11):
         return
 
@@ -832,5 +879,6 @@ if __name__ == "__main__":
     threading.Thread(target=gps_reader,    daemon=True).start()
     threading.Thread(target=channel_hopper, args=(SCAN_IFACE, schedule_dual, spb_dual, schedule_24, spb_24), daemon=True).start()
     threading.Thread(target=snapshot_thread, daemon=True).start()
+    threading.Thread(target=watchdog, args=(SCAN_IFACE,), daemon=True).start()
 
     sniff(iface=SCAN_IFACE, prn=handle_packet, store=False)

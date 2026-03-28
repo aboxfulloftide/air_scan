@@ -18,7 +18,7 @@ import time
 
 GPS_HOST    = "127.0.0.1"
 GPS_PORT    = 2947
-FIX_TIMEOUT = 60   # seconds to wait for a GPS fix
+FIX_TIMEOUT = 1800   # seconds to wait for a GPS fix (up to 30 min for cold start)
 
 
 def ntp(enable: bool):
