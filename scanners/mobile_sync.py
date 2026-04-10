@@ -132,11 +132,16 @@ def sync(sqlite_path, dry_run=False):
 
     # Pull unsynced observations with their device data
     # session_id stored as "hostname:started_at" for traceability
-    # Detect whether BLE columns exist in this SQLite DB (added by migrate_010)
+    # Detect which BLE columns exist in this SQLite DB
     obs_cols = {row[1] for row in src.execute("PRAGMA table_info(observations)")}
-    has_ble_cols = "manufacturer_data" in obs_cols
+    has_ble_cols     = "manufacturer_data" in obs_cols
+    has_tracker_cols = "tracker_type" in obs_cols
 
-    ble_select = ", o.manufacturer_data, o.adv_services, o.tx_power" if has_ble_cols else ", NULL, NULL, NULL"
+    if has_ble_cols:
+        ble_select = ", o.manufacturer_data, o.adv_services, o.tx_power"
+        ble_select += ", o.adv_service_data, o.tracker_type" if has_tracker_cols else ", NULL, NULL"
+    else:
+        ble_select = ", NULL, NULL, NULL, NULL, NULL"
 
     rows = src.execute(f"""
         SELECT
@@ -253,6 +258,7 @@ def sync(sqlite_path, dry_run=False):
             row["gps_lat"], row["gps_lon"], row["gps_fix"],
             row["session_id"], row["recorded_at"],
             row["manufacturer_data"], row["adv_services"], row["tx_power"],
+            row["adv_service_data"], row["tracker_type"],
         ))
         obs_synced.append(row["obs_id"])
 
@@ -262,8 +268,9 @@ def sync(sqlite_path, dry_run=False):
                     (mac, interface, scanner_host, signal_dbm, channel,
                      freq_mhz, channel_flags, gps_lat, gps_lon, gps_fix,
                      session_id, recorded_at,
-                     manufacturer_data, adv_services, tx_power)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     manufacturer_data, adv_services, tx_power,
+                     adv_service_data, tracker_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, obs_batch)
             dst.commit()
             total_written += len(obs_batch)
