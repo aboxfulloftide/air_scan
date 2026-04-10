@@ -103,9 +103,14 @@ def detect_supported_bands(iface):
         for band in candidate_bands:
             test_freq = BAND_FREQS[band][0]
             r = subprocess.run(
-                ["iw", "dev", iface, "set", "freq", str(test_freq)],
+                ["iw", "dev", iface, "set", "freq", str(test_freq), "HT20"],
                 capture_output=True, text=True
             )
+            if r.returncode != 0:
+                r = subprocess.run(
+                    ["iw", "dev", iface, "set", "freq", str(test_freq)],
+                    capture_output=True, text=True
+                )
             if r.returncode == 0:
                 working_bands.append(band)
                 print(f"[BAND] {band}GHz OK ({test_freq} MHz)")
@@ -140,9 +145,15 @@ def get_target_freq(utc_unix, schedule, slots_per_band):
 
 def set_freq(iface, freq_mhz):
     r = subprocess.run(
-        ["iw", "dev", iface, "set", "freq", str(freq_mhz)],
+        ["iw", "dev", iface, "set", "freq", str(freq_mhz), "HT20"],
         capture_output=True, text=True
     )
+    if r.returncode != 0:
+        # Fall back to legacy mode if HT20 not supported
+        r = subprocess.run(
+            ["iw", "dev", iface, "set", "freq", str(freq_mhz)],
+            capture_output=True, text=True
+        )
     if r.returncode != 0:
         print(f"\n[HOP] Failed to set {freq_mhz} MHz: {r.stderr.strip()}")
         return False
@@ -261,7 +272,7 @@ def mac_is_randomized(mac):
 
 def get_manufacturer(mac):
     try:
-        m = conf.manufdb.get_manuf(mac)
+        m = conf.manufdb._get_manuf(mac)
         return m if m else None
     except: return None
 
@@ -326,9 +337,10 @@ def handle_packet(pkt):
                 "ssids": set(), "ht": ht, "vht": vht, "he": he,
                 "vendor_ouis": set(), "oui": oui,
                 "is_randomized": randomized, "manufacturer": dev["manufacturer"],
-                "last_heard": ts,
+                "last_heard": ts, "probe_count": 1,
             }
         else:
+            live[mac]["probe_count"] = live[mac].get("probe_count", 0) + 1
             live[mac]["signal"]      = sig
             live[mac]["last_heard"]  = ts
             if channel is not None: live[mac]["channel"]       = channel
@@ -372,6 +384,9 @@ def snapshot_thread():
                 mac: dict(v) for mac, v in live.items()
                 if v["last_heard"].timestamp() >= window_start
             }
+            # Reset probe counts for next window
+            for v in live.values():
+                v["probe_count"] = 0
 
         for mac, s in snap.items():
             pending_observations.append({
@@ -384,6 +399,7 @@ def snapshot_thread():
                 "vendor_ouis": s.get("vendor_ouis", set()),
                 "oui": s.get("oui"), "is_randomized": s.get("is_randomized", False),
                 "manufacturer": s.get("manufacturer"),
+                "probe_count": s.get("probe_count", 1),
             })
 
         print(
@@ -440,6 +456,7 @@ def obs_to_jsonl(obs):
         "oui":           obs.get("oui"),
         "is_randomized": obs.get("is_randomized", False),
         "manufacturer":  obs.get("manufacturer"),
+        "probe_count":   obs.get("probe_count", 1),
     }
 
 
@@ -533,10 +550,11 @@ def flush_to_db():
                          ht_capable, vht_capable, he_capable, first_seen, last_seen)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
-                        last_seen   = GREATEST(last_seen,   VALUES(last_seen)),
-                        ht_capable  = GREATEST(ht_capable,  VALUES(ht_capable)),
-                        vht_capable = GREATEST(vht_capable, VALUES(vht_capable)),
-                        he_capable  = GREATEST(he_capable,  VALUES(he_capable))
+                        last_seen    = GREATEST(last_seen,   VALUES(last_seen)),
+                        manufacturer = COALESCE(manufacturer, VALUES(manufacturer)),
+                        ht_capable   = GREATEST(ht_capable,  VALUES(ht_capable)),
+                        vht_capable  = GREATEST(vht_capable, VALUES(vht_capable)),
+                        he_capable   = GREATEST(he_capable,  VALUES(he_capable))
                 """, (mac, d["type"], d["oui"], d["manufacturer"], int(d["is_randomized"]),
                       int(d["ht"]), int(d["vht"]), int(d["he"]), d["first_seen"], d["last_seen"]))
 
@@ -554,10 +572,11 @@ def flush_to_db():
             cur.executemany("""
                 INSERT INTO observations
                     (mac, interface, scanner_host, signal_dbm, channel,
-                     freq_mhz, channel_flags, recorded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                     freq_mhz, channel_flags, probe_count, recorded_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, [(o["mac"], o["interface"], o["host"], o["signal"], o["channel"],
-                   o.get("freq_mhz"), o.get("channel_flags"), o["ts"]) for o in batch])
+                   o.get("freq_mhz"), o.get("channel_flags"), o.get("probe_count", 1),
+                   o["ts"]) for o in batch])
 
             conn.commit()
             cur.close()

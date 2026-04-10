@@ -1,11 +1,12 @@
 import { Outlet, NavLink } from 'react-router-dom'
-import { LayoutDashboard, Radio, Map, Wifi, Navigation } from 'lucide-react'
+import { LayoutDashboard, Radio, Map, Wifi, Navigation, Crosshair } from 'lucide-react'
 
 const navItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/devices', label: 'Devices', icon: Wifi },
   { to: '/map', label: 'Map', icon: Map },
   { to: '/mobile', label: 'Mobile', icon: Navigation },
+  { to: '/calibrate', label: 'Calibrate', icon: Crosshair },
   { to: '/scanners', label: 'Scanners', icon: Radio },
 ]
 

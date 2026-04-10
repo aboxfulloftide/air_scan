@@ -39,10 +39,12 @@ If setting up a fresh DB:
 mysql -h 192.168.1.42 -u networkscan -p wireless < db/setup_db.sql
 ```
 
-If migrating an existing DB:
+If migrating an existing DB, run all migrations in order:
 
 ```bash
 mysql -h 192.168.1.42 -u networkscan -p wireless < db/migrate_001_phase1.sql
+# ... run all migrations through the latest:
+mysql -h 192.168.1.42 -u networkscan -p wireless < db/migrate_014_probe_count.sql
 ```
 
 ---

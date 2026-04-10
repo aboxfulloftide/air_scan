@@ -21,8 +21,12 @@ CREATE TABLE IF NOT EXISTS devices (
     INDEX idx_last_seen (last_seen)
 );
 
+-- Partitioned by day for instant cleanup (ALTER TABLE DROP PARTITION).
+-- The FK on mac is dropped because MySQL doesn't support FKs on partitioned tables.
+-- The PK includes recorded_at because MySQL requires the partition key in all unique indexes.
+-- The cleanup job creates future partitions and drops old ones daily.
 CREATE TABLE IF NOT EXISTS observations (
-    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id              BIGINT UNSIGNED AUTO_INCREMENT,
     mac             VARCHAR(17) NOT NULL,
     interface       VARCHAR(20) NOT NULL,
     scanner_host    VARCHAR(64) NOT NULL,
@@ -30,12 +34,15 @@ CREATE TABLE IF NOT EXISTS observations (
     channel         TINYINT UNSIGNED,
     freq_mhz        SMALLINT UNSIGNED,
     channel_flags   VARCHAR(40),
+    probe_count     SMALLINT UNSIGNED NOT NULL DEFAULT 1,
     recorded_at     DATETIME NOT NULL,
+    PRIMARY KEY (id, recorded_at),
     INDEX idx_mac (mac),
     INDEX idx_recorded_at (recorded_at),
     INDEX idx_scanner_host (scanner_host),
-    INDEX idx_observations_recorded_signal (recorded_at, signal_dbm, mac, scanner_host),
-    FOREIGN KEY (mac) REFERENCES devices(mac) ON UPDATE CASCADE
+    INDEX idx_observations_recorded_signal (recorded_at, signal_dbm, mac, scanner_host)
+) PARTITION BY RANGE (TO_DAYS(recorded_at)) (
+    PARTITION p_future VALUES LESS THAN MAXVALUE
 );
 
 CREATE TABLE IF NOT EXISTS ssids (

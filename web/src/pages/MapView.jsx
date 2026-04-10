@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap, LayersControl, LayerGroup, CircleMarker, Tooltip } from 'react-leaflet'
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMapEvents, useMap, LayersControl, LayerGroup, CircleMarker, Tooltip } from 'react-leaflet'
 import L from 'leaflet'
 import api from '../api/client'
 import { Search, Radio, X, Wifi, Trash2, MonitorSmartphone } from 'lucide-react'
@@ -38,6 +38,47 @@ const fixedDeviceIcon = L.divIcon({
   iconAnchor: [14, 14],
 })
 
+// Spread overlapping items in a circle so they're individually clickable
+// Returns a Map<originalKey, [offsetLat, offsetLon]>
+// spreadMeters controls how far apart items are pushed at the given zoom
+function spreadOverlaps(items, latFn, lonFn, zoom) {
+  // Grid cell size in degrees — at zoom 20 a marker covers ~2m, so group within ~4m
+  // 0.00004 deg ≈ 4.4m at mid-latitudes; scale with zoom
+  const cellDeg = 0.00004 * Math.pow(2, 20 - Math.min(zoom, 22))
+  // Spread radius: how far apart to push items in a group
+  const spreadDeg = 0.000025 * Math.pow(2, 20 - Math.min(zoom, 22))
+
+  const groups = new Map()
+  for (let i = 0; i < items.length; i++) {
+    const lat = latFn(items[i]), lon = lonFn(items[i])
+    // Snap to grid cell
+    const gLat = Math.round(lat / cellDeg)
+    const gLon = Math.round(lon / cellDeg)
+    const key = `${gLat},${gLon}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(i)
+  }
+  const offsets = new Array(items.length)
+  for (const indices of groups.values()) {
+    if (indices.length === 1) {
+      offsets[indices[0]] = [0, 0]
+    } else {
+      const n = indices.length
+      // Use concentric rings for large groups
+      const perRing = Math.max(6, n)
+      for (let j = 0; j < n; j++) {
+        const ring = Math.floor(j / perRing)
+        const posInRing = j % perRing
+        const ringCount = Math.min(perRing, n - ring * perRing)
+        const r = spreadDeg * (ring + 1)
+        const angle = (2 * Math.PI * posInRing) / ringCount
+        offsets[indices[j]] = [Math.cos(angle) * r, Math.sin(angle) * r]
+      }
+    }
+  }
+  return offsets
+}
+
 // Confidence → CircleMarker style
 const confidenceStyle = (confidence) => {
   const conf = parseFloat(confidence) || 0
@@ -49,9 +90,12 @@ const confidenceStyle = (confidence) => {
 // Highlight ring for searched device
 const highlightIcon = L.divIcon({
   className: '',
-  html: `<div style="width:32px;height:32px;border-radius:50%;border:3px solid #f59e0b;background:rgba(245,158,11,0.15);animation:pulse-ring 1.5s ease-in-out infinite"></div>`,
-  iconSize: [32, 32],
-  iconAnchor: [16, 16],
+  html: `<div style="position:relative;width:48px;height:48px">
+    <div style="position:absolute;inset:0;border-radius:50%;border:3px solid #f59e0b;background:rgba(245,158,11,0.18);animation:pulse-ring 1.5s ease-in-out infinite"></div>
+    <div style="position:absolute;inset:-12px;border-radius:50%;border:2px solid rgba(245,158,11,0.4);animation:pulse-ring 1.5s ease-in-out infinite 0.3s"></div>
+  </div>`,
+  iconSize: [48, 48],
+  iconAnchor: [24, 24],
 })
 
 // Pending placement icon
@@ -130,6 +174,26 @@ function ZoomTracker({ onZoomChange }) {
   const map = useMap()
   useMapEvents({ zoomend: () => onZoomChange(map.getZoom()) })
   useEffect(() => { onZoomChange(map.getZoom()) }, [map, onZoomChange])
+  return null
+}
+
+const LAYER_STORAGE_KEY = 'mapView.visibleLayers'
+const ALL_LAYERS = ['Scanners', 'Placed APs', 'Fixed Devices', 'Detected Clients', 'Detected APs']
+
+function getStoredLayers() {
+  try { const s = localStorage.getItem(LAYER_STORAGE_KEY); return s ? JSON.parse(s) : null }
+  catch { return null }
+}
+
+function LayerPersist({ onLayerChange }) {
+  const map = useMap()
+  useEffect(() => {
+    const onAdd = (e) => onLayerChange(e.name, true)
+    const onRemove = (e) => onLayerChange(e.name, false)
+    map.on('overlayadd', onAdd)
+    map.on('overlayremove', onRemove)
+    return () => { map.off('overlayadd', onAdd); map.off('overlayremove', onRemove) }
+  }, [map, onLayerChange])
   return null
 }
 
@@ -289,6 +353,23 @@ export default function MapView() {
   const [zoom, setZoom] = useState(20)
   const handleZoomChange = useCallback((z) => setZoom(z), [])
   const [tileProvider, setTileProvider] = useState('google')
+  const [timeRange, setTimeRange] = useState(() => {
+    const stored = localStorage.getItem('map_time_range')
+    return stored ? parseFloat(stored) : 3
+  })
+
+  // Layer visibility (persisted to localStorage)
+  const [visibleLayers, setVisibleLayers] = useState(() => {
+    const stored = getStoredLayers()
+    return stored || Object.fromEntries(ALL_LAYERS.map((l) => [l, true]))
+  })
+  const handleLayerChange = useCallback((name, visible) => {
+    setVisibleLayers((prev) => {
+      const next = { ...prev, [name]: visible }
+      localStorage.setItem(LAYER_STORAGE_KEY, JSON.stringify(next))
+      return next
+    })
+  }, [])
 
   // Drawing state
   const [drawMode, setDrawMode] = useState('select') // 'select' | 'wall_line' | 'wall_freehand' | 'floor_zone'
@@ -322,8 +403,8 @@ export default function MapView() {
   })
 
   const { data: computedPositions } = useQuery({
-    queryKey: ['computedPositions'],
-    queryFn: () => api.get('/maps/positions').then((r) => r.data),
+    queryKey: ['computedPositions', timeRange],
+    queryFn: () => api.get('/maps/positions', { params: { hours: timeRange } }).then((r) => r.data),
     refetchInterval: 10000,
   })
 
@@ -343,6 +424,17 @@ export default function MapView() {
   const computedList = Array.isArray(computedPositions) ? computedPositions : []
   const wallList = Array.isArray(walls) ? walls : []
   const floorList = Array.isArray(floors) ? floors : []
+
+  // Compute offsets for overlapping items so stacked markers fan out
+  const computedOffsets = useMemo(() =>
+    spreadOverlaps(computedList, (d) => parseFloat(d.lat), (d) => parseFloat(d.lon), zoom),
+    [computedList, zoom])
+  const apOffsets = useMemo(() =>
+    spreadOverlaps(placedAPList, (d) => parseFloat(d.lat), (d) => parseFloat(d.lon), zoom),
+    [placedAPList, zoom])
+  const fixedOffsets = useMemo(() =>
+    spreadOverlaps(fixedDeviceList, (d) => parseFloat(d.lat), (d) => parseFloat(d.lon), zoom),
+    [fixedDeviceList, zoom])
 
   // Mutations
   const updateScanner = useMutation({
@@ -500,6 +592,20 @@ export default function MapView() {
               </button>
             ))}
           </div>
+          <div className="flex bg-gray-800 rounded-lg p-0.5 text-xs">
+            {[
+              { value: 1, label: '1h' },
+              { value: 3, label: '3h' },
+              { value: 12, label: '12h' },
+              { value: 24, label: '24h' },
+              { value: 0, label: 'All' },
+            ].map((opt) => (
+              <button key={opt.value} onClick={() => { setTimeRange(opt.value); localStorage.setItem('map_time_range', String(opt.value)) }}
+                className={`px-2.5 py-1 rounded-md transition-colors ${timeRange === opt.value ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex gap-2">
           {placementMode === 'idle' && !isDrawing && (
@@ -634,8 +740,9 @@ export default function MapView() {
           <AutoTileLayer zoom={zoom} provider={tileProvider} />
           <ZoomTracker onZoomChange={handleZoomChange} />
 
+          <LayerPersist onLayerChange={handleLayerChange} />
           <LayersControl position="topright">
-            <LayersControl.Overlay name="Scanners" checked>
+            <LayersControl.Overlay name="Scanners" checked={visibleLayers['Scanners'] !== false}>
               <LayerGroup>
                 {placedScanners.map((s) => (
                   <Marker key={`scanner-${s.id}`} position={[parseFloat(s.x_pos), parseFloat(s.y_pos)]}
@@ -661,10 +768,10 @@ export default function MapView() {
               </LayerGroup>
             </LayersControl.Overlay>
 
-            <LayersControl.Overlay name="Placed APs" checked>
+            <LayersControl.Overlay name="Placed APs" checked={visibleLayers['Placed APs'] !== false}>
               <LayerGroup>
-                {placedAPList.map((ap) => (
-                  <Marker key={`ap-${ap.mac}`} position={[parseFloat(ap.lat), parseFloat(ap.lon)]} icon={apIcon}
+                {placedAPList.map((ap, idx) => (
+                  <Marker key={`ap-${ap.mac}`} position={[parseFloat(ap.lat) + (apOffsets[idx]?.[0] || 0), parseFloat(ap.lon) + (apOffsets[idx]?.[1] || 0)]} icon={apIcon}
                     interactive={!isPlacing}>
                     {!isPlacing && (
                       <Popup>
@@ -687,10 +794,10 @@ export default function MapView() {
               </LayerGroup>
             </LayersControl.Overlay>
 
-            <LayersControl.Overlay name="Fixed Devices" checked>
+            <LayersControl.Overlay name="Fixed Devices" checked={visibleLayers['Fixed Devices'] !== false}>
               <LayerGroup>
-                {fixedDeviceList.map((device) => (
-                  <Marker key={`fixed-${device.mac}`} position={[parseFloat(device.lat), parseFloat(device.lon)]} icon={fixedDeviceIcon}
+                {fixedDeviceList.map((device, idx) => (
+                  <Marker key={`fixed-${device.mac}`} position={[parseFloat(device.lat) + (fixedOffsets[idx]?.[0] || 0), parseFloat(device.lon) + (fixedOffsets[idx]?.[1] || 0)]} icon={fixedDeviceIcon}
                     interactive={!isPlacing}>
                     {!isPlacing && (
                       <Popup>
@@ -715,16 +822,21 @@ export default function MapView() {
               </LayerGroup>
             </LayersControl.Overlay>
 
-            <LayersControl.Overlay name="Detected Clients" checked>
+            <LayersControl.Overlay name="Detected Clients" checked={visibleLayers['Detected Clients'] !== false}>
               <LayerGroup>
-                {computedList.filter((d) => d.device_type === 'Client').map((d) => {
+                {computedList.map((d, idx) => {
+                  if (d.device_type !== 'Client') return null
+                  const off = computedOffsets[idx] || [0, 0]
                   const style = confidenceStyle(d.confidence)
                   const name = d.known_label || d.owner || ''
+                  const isFocused = focusMac && d.mac === focusMac
                   return (
                     <CircleMarker key={`pos-${d.mac}`}
-                      center={[parseFloat(d.lat), parseFloat(d.lon)]}
-                      radius={zoom >= 20 ? 7 : 5}
-                      pathOptions={{ fillColor: style.fillColor, fillOpacity: 0.7, color: style.color, weight: 2, opacity: 0.9 }}
+                      center={[parseFloat(d.lat) + off[0], parseFloat(d.lon) + off[1]]}
+                      radius={isFocused ? 12 : zoom >= 20 ? 7 : 5}
+                      pathOptions={isFocused
+                        ? { fillColor: '#f59e0b', fillOpacity: 0.9, color: '#fbbf24', weight: 3, opacity: 1 }
+                        : { fillColor: style.fillColor, fillOpacity: 0.7, color: style.color, weight: 2, opacity: 0.9 }}
                       interactive={!isPlacing}>
                       {!isPlacing && (
                         <>
@@ -751,16 +863,21 @@ export default function MapView() {
               </LayerGroup>
             </LayersControl.Overlay>
 
-            <LayersControl.Overlay name="Detected APs" checked>
+            <LayersControl.Overlay name="Detected APs" checked={visibleLayers['Detected APs'] !== false}>
               <LayerGroup>
-                {computedList.filter((d) => d.device_type === 'AP').map((d) => {
+                {computedList.map((d, idx) => {
+                  if (d.device_type !== 'AP') return null
+                  const off = computedOffsets[idx] || [0, 0]
                   const style = confidenceStyle(d.confidence)
                   const name = d.ssids || d.known_label || ''
+                  const isFocused = focusMac && d.mac === focusMac
                   return (
                     <CircleMarker key={`pos-${d.mac}`}
-                      center={[parseFloat(d.lat), parseFloat(d.lon)]}
-                      radius={zoom >= 20 ? 7 : 5}
-                      pathOptions={{ fillColor: style.fillColor, fillOpacity: 0.7, color: style.color, weight: 2, opacity: 0.9 }}
+                      center={[parseFloat(d.lat) + off[0], parseFloat(d.lon) + off[1]]}
+                      radius={isFocused ? 12 : zoom >= 20 ? 7 : 5}
+                      pathOptions={isFocused
+                        ? { fillColor: '#f59e0b', fillOpacity: 0.9, color: '#fbbf24', weight: 3, opacity: 1 }
+                        : { fillColor: style.fillColor, fillOpacity: 0.7, color: style.color, weight: 2, opacity: 0.9 }}
                       interactive={!isPlacing}>
                       {!isPlacing && (
                         <>
@@ -787,6 +904,44 @@ export default function MapView() {
               </LayerGroup>
             </LayersControl.Overlay>
           </LayersControl>
+
+          {/* Tether lines from spread positions back to true position */}
+          {computedList.map((d, idx) => {
+            const off = computedOffsets[idx]
+            if (!off || (off[0] === 0 && off[1] === 0)) return null
+            const realLat = parseFloat(d.lat)
+            const realLon = parseFloat(d.lon)
+            return (
+              <Polyline key={`tether-${d.mac}`}
+                positions={[[realLat + off[0], realLon + off[1]], [realLat, realLon]]}
+                pathOptions={{ color: '#6b7280', weight: 1, opacity: 0.5, dashArray: '4 4' }}
+                interactive={false} />
+            )
+          })}
+          {placedAPList.map((ap, idx) => {
+            const off = apOffsets[idx]
+            if (!off || (off[0] === 0 && off[1] === 0)) return null
+            const realLat = parseFloat(ap.lat)
+            const realLon = parseFloat(ap.lon)
+            return (
+              <Polyline key={`tether-ap-${ap.mac}`}
+                positions={[[realLat + off[0], realLon + off[1]], [realLat, realLon]]}
+                pathOptions={{ color: '#6b7280', weight: 1, opacity: 0.5, dashArray: '4 4' }}
+                interactive={false} />
+            )
+          })}
+          {fixedDeviceList.map((device, idx) => {
+            const off = fixedOffsets[idx]
+            if (!off || (off[0] === 0 && off[1] === 0)) return null
+            const realLat = parseFloat(device.lat)
+            const realLon = parseFloat(device.lon)
+            return (
+              <Polyline key={`tether-fixed-${device.mac}`}
+                positions={[[realLat + off[0], realLon + off[1]], [realLat, realLon]]}
+                pathOptions={{ color: '#6b7280', weight: 1, opacity: 0.5, dashArray: '4 4' }}
+                interactive={false} />
+            )
+          })}
 
           <MapRecenter
             lat={mapConfig?.gps_anchor_lat ? parseFloat(mapConfig.gps_anchor_lat) : null}
@@ -830,7 +985,7 @@ export default function MapView() {
 
           {/* Highlight ring on searched/focused device */}
           {focusMac && focusPoint && (
-            <Marker position={focusPoint} icon={highlightIcon} interactive={false} zIndexOffset={-100} />
+            <Marker position={focusPoint} icon={highlightIcon} interactive={false} zIndexOffset={1000} />
           )}
 
           {/* Pending placement marker — draggable for fine-tuning */}

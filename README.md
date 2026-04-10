@@ -20,7 +20,7 @@ A distributed WiFi passive scanning system built for Raspberry Pi. Multiple scan
 
 1. `wlan1` is placed into **monitor mode** at boot via a systemd service
 2. The scanner passively sniffs **beacon frames** (access points) and **probe requests** (client devices)
-3. Every **10 seconds**, at aligned UTC clock boundaries (`:00`, `:10`, `:20`...), the most recent signal reading and radio data per device is snapshotted
+3. Every **10 seconds**, at aligned UTC clock boundaries (`:00`, `:10`, `:20`...), the best signal reading, radio data, and raw packet count per device is snapshotted
 4. Every **60 seconds**, those snapshots (~6 per device) are batch-written to MySQL
 5. Each observation is tagged with the scanner's **hostname** and **interface**, so multiple scanners writing to the same DB remain distinguishable
 
@@ -87,6 +87,7 @@ vendor_ies    -- vendor-specific IE OUIs seen per device
 | `channel` | TINYINT UNSIGNED | WiFi channel number |
 | `freq_mhz` | SMALLINT UNSIGNED | Exact frequency in MHz (e.g. `2412`, `5180`) |
 | `channel_flags` | VARCHAR(40) | Band and modulation (e.g. `2GHz+CCK`, `5GHz+OFDM`) |
+| `probe_count` | SMALLINT UNSIGNED | Raw packets seen for this MAC during the 10s window (default 1) |
 | `recorded_at` | DATETIME | UTC timestamp of snapshot boundary |
 
 ### `ssids`

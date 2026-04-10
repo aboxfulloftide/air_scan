@@ -74,7 +74,7 @@ def weighted_centroid(scanner_positions, rssi_values):
     return lat, lon
 
 
-def external_position(scanner_positions, rssi_values, ref_lat, ref_lon, min_outside_m=7):
+def external_position(scanner_positions, rssi_values, ref_lat, ref_lon, min_outside_m=5):
     """Position an external device (neighbor AP) outside the scanner area.
 
     Uses weighted centroid to find direction, then projects outward from
@@ -146,11 +146,15 @@ def compute_confidence(scanner_count, rssi_spread):
 # RSSI calibration (#2: per-scanner correction)
 # ---------------------------------------------------------------------------
 
-def calibrate_path_loss(scanners, fixed_devices, obs):
-    """Auto-calibrate path-loss model from fixed device observations.
+def calibrate_path_loss(scanners, fixed_devices, obs, calibration_data=None):
+    """Auto-calibrate path-loss model from fixed devices and calibration walkthrough data.
 
     Fits RSSI = A - 10*n*log10(d) via linear regression on all
-    (scanner, fixed_device) pairs where we know both positions.
+    (scanner, known_position) pairs where we know both positions.
+
+    Sources:
+      1. Fixed devices (from known_devices) + live observations
+      2. Calibration walkthrough points (pre-recorded RSSI at known locations)
 
     Returns (tx_power_at_1m, path_loss_n) or (None, None) if
     insufficient data or the fit produces unreasonable values.
@@ -158,6 +162,7 @@ def calibrate_path_loss(scanners, fixed_devices, obs):
     xs = []  # log10(distance)
     ys = []  # observed RSSI
 
+    # Source 1: Fixed devices with live observations
     for dev in fixed_devices:
         if dev["mac"] not in obs:
             continue
@@ -171,6 +176,20 @@ def calibrate_path_loss(scanners, fixed_devices, obs):
                 d = 0.5
             xs.append(math.log10(d))
             ys.append(rssi)
+
+    # Source 2: Calibration walkthrough points (stored RSSI snapshots at known GPS positions)
+    if calibration_data:
+        for point in calibration_data:
+            for reading in point["readings"]:
+                scanner_host = reading["scanner_host"]
+                if scanner_host not in scanners:
+                    continue
+                s = scanners[scanner_host]
+                d = haversine_distance(s["lat"], s["lon"], point["lat"], point["lon"])
+                if d < 0.5:
+                    d = 0.5
+                xs.append(math.log10(d))
+                ys.append(reading["avg_rssi"])
 
     if len(xs) < 4:
         return None, None
@@ -288,11 +307,53 @@ def run_cycle(conn):
                      for row in cur.fetchall()]
     fixed_macs = {d["mac"] for d in fixed_devices}
 
+    # 3a. Load calibration walkthrough data (pre-recorded RSSI at known locations)
+    calibration_data = []
+    try:
+        cur.execute("""
+            SELECT cp.id, cp.lat, cp.lon
+            FROM calibration_points cp
+        """)
+        cal_points = cur.fetchall()
+        for cp in cal_points:
+            cur.execute("""
+                SELECT scanner_host, avg_rssi
+                FROM calibration_readings
+                WHERE point_id = %s
+            """, (cp["id"],))
+            readings = [{"scanner_host": r["scanner_host"], "avg_rssi": float(r["avg_rssi"])}
+                        for r in cur.fetchall()]
+            if readings:
+                calibration_data.append({
+                    "lat": float(cp["lat"]),
+                    "lon": float(cp["lon"]),
+                    "readings": readings,
+                })
+        if calibration_data:
+            print(f"  Loaded {len(calibration_data)} calibration walkthrough points")
+    except Exception:
+        pass  # Table may not exist yet
+
     # 3b. Load AP MACs and which ones are manually placed (in-house APs)
+    #     Also treat APs sharing an SSID with a placed AP as internal (same router, different BSSID)
     cur.execute("SELECT mac FROM devices WHERE device_type = 'AP'")
     ap_macs = {row["mac"] for row in cur.fetchall()}
     cur.execute("SELECT DISTINCT mac FROM device_positions WHERE method = 'manual'")
     placed_ap_macs = {row["mac"] for row in cur.fetchall()}
+
+    # Find SSIDs used by placed APs, then find all other APs sharing those SSIDs
+    if placed_ap_macs:
+        ph = ",".join(["%s"] * len(placed_ap_macs))
+        cur.execute(f"""
+            SELECT DISTINCT s2.mac
+            FROM ssids s1
+            JOIN ssids s2 ON s2.ssid = s1.ssid
+            JOIN devices d ON d.mac = s2.mac AND d.device_type = 'AP'
+            WHERE s1.mac IN ({ph})
+              AND s1.ssid REGEXP '^[[:print:]]{{1,32}}$'
+        """, list(placed_ap_macs))
+        for row in cur.fetchall():
+            placed_ap_macs.add(row["mac"])
 
     # 4. Pre-filter: only position MACs seen in >= 75% of scan slots over 2 hours
     #    A "scan slot" = 10-second UTC-aligned window
@@ -362,10 +423,10 @@ def run_cycle(conn):
         cur.close()
         return
 
-    # 5b. Per-scanner RSSI correction using fixed devices as calibration anchors
-    if settings["rssi_correction"] and fixed_devices:
-        # Auto-calibrate path-loss model from the fixed device data
-        cal_tx, cal_n = calibrate_path_loss(scanners, fixed_devices, obs)
+    # 5b. Per-scanner RSSI correction using fixed devices and calibration walkthrough data
+    if settings["rssi_correction"] and (fixed_devices or calibration_data):
+        # Auto-calibrate path-loss model from fixed devices + walkthrough points
+        cal_tx, cal_n = calibrate_path_loss(scanners, fixed_devices, obs, calibration_data)
         if cal_tx is not None:
             tx_power, path_loss_n = cal_tx, cal_n
             print(f"  Auto-calibrated path-loss: TX={tx_power:.1f}dBm, n={path_loss_n:.2f}")
@@ -412,9 +473,16 @@ def run_cycle(conn):
             avg_err = sum(errors) / len(errors)
             print(f"  Fixed device validation: avg={avg_err:.1f}m, max={max(errors):.1f}m ({len(errors)} devices)")
 
-    # 7. Compute reference point (centroid of scanners) for external positioning
-    ref_lat = sum(s["lat"] for s in scanners.values()) / len(scanners)
-    ref_lon = sum(s["lon"] for s in scanners.values()) / len(scanners)
+    # 7. Compute reference point and house boundary using ALL positioned scanners
+    #    (not just active ones — the house doesn't shrink when a scanner goes offline)
+    cur.execute("SELECT x_pos AS lat, y_pos AS lon FROM scanners WHERE x_pos IS NOT NULL")
+    all_scanner_positions = [{"lat": float(r["lat"]), "lon": float(r["lon"])} for r in cur.fetchall()]
+    ref_lat = sum(s["lat"] for s in all_scanner_positions) / len(all_scanner_positions)
+    ref_lon = sum(s["lon"] for s in all_scanner_positions) / len(all_scanner_positions)
+    house_max_dist = max(
+        haversine_distance(s["lat"], s["lon"], ref_lat, ref_lon)
+        for s in all_scanner_positions
+    )
 
     # 8. Position each non-fixed MAC
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -443,6 +511,14 @@ def run_cycle(conn):
             rssi_spread = max(rssi_vals) - min(rssi_vals)
             method = "trilateration"
             methods["trilateration"] += 1
+        elif is_external_ap:
+            # Single scanner AP — push outside from centroid through scanner
+            h, rssi = valid[0]
+            positions = [(scanners[h]["lat"], scanners[h]["lon"])]
+            lat, lon = external_position(positions, [rssi], ref_lat, ref_lon)
+            rssi_spread = 0
+            method = "single_scanner"
+            methods["single_scanner"] += 1
         else:
             # Single scanner — position at the scanner location
             h = valid[0][0]
@@ -451,6 +527,20 @@ def run_cycle(conn):
             rssi_spread = 0
             method = "single_scanner"
             methods["single_scanner"] += 1
+
+        # Safety net: ensure non-placed APs are at least 5m outside house perimeter
+        if is_external_ap:
+            dist_from_center = haversine_distance(lat, lon, ref_lat, ref_lon)
+            min_dist = house_max_dist + 5
+            if dist_from_center < min_dist and dist_from_center > 0.1:
+                # Push outward from centroid to at least min_dist
+                scale = min_dist / dist_from_center
+                m_per_deg_lat = EARTH_RADIUS_M * math.pi / 180
+                m_per_deg_lon = m_per_deg_lat * math.cos(math.radians(ref_lat))
+                dlat = (lat - ref_lat) * m_per_deg_lat
+                dlon = (lon - ref_lon) * m_per_deg_lon
+                lat = ref_lat + dlat * scale / m_per_deg_lat
+                lon = ref_lon + dlon * scale / m_per_deg_lon
 
         confidence = compute_confidence(count, rssi_spread)
 
@@ -479,6 +569,91 @@ def run_cycle(conn):
 
 
 # ---------------------------------------------------------------------------
+# One-time fix: push stale AP positions outside house
+# ---------------------------------------------------------------------------
+
+def fix_existing_ap_positions():
+    """Find all non-placed AP positions inside the house perimeter and push them out."""
+    conn = mysql.connector.connect(**DB_CONFIG)
+    cur = conn.cursor(dictionary=True)
+
+    # Load scanners
+    cur.execute("SELECT hostname, x_pos AS lat, y_pos AS lon FROM scanners WHERE x_pos IS NOT NULL")
+    scanners = {r["hostname"]: {"lat": float(r["lat"]), "lon": float(r["lon"])} for r in cur.fetchall()}
+    if not scanners:
+        print("No scanners with positions")
+        return
+
+    ref_lat = sum(s["lat"] for s in scanners.values()) / len(scanners)
+    ref_lon = sum(s["lon"] for s in scanners.values()) / len(scanners)
+    max_scanner_dist = max(
+        haversine_distance(s["lat"], s["lon"], ref_lat, ref_lon)
+        for s in scanners.values()
+    )
+    min_dist = max_scanner_dist + 5
+    print(f"Centroid: ({ref_lat:.8f}, {ref_lon:.8f})")
+    print(f"Max scanner dist: {max_scanner_dist:.1f}m, min outside dist: {min_dist:.1f}m")
+
+    # Get manually placed AP MACs (these stay where they are)
+    cur.execute("SELECT DISTINCT mac FROM device_positions WHERE method = 'manual'")
+    placed = {r["mac"] for r in cur.fetchall()}
+
+    # Also treat APs sharing an SSID with a placed AP as internal
+    if placed:
+        ph = ",".join(["%s"] * len(placed))
+        cur.execute(f"""
+            SELECT DISTINCT s2.mac
+            FROM ssids s1
+            JOIN ssids s2 ON s2.ssid = s1.ssid
+            JOIN devices d ON d.mac = s2.mac AND d.device_type = 'AP'
+            WHERE s1.mac IN ({ph})
+              AND s1.ssid REGEXP '^[[:print:]]{{1,32}}$'
+        """, list(placed))
+        for row in cur.fetchall():
+            placed.add(row["mac"])
+
+    # Get all AP MACs
+    cur.execute("SELECT mac FROM devices WHERE device_type = 'AP'")
+    ap_macs = {r["mac"] for r in cur.fetchall()}
+
+    # For each non-placed AP, get the latest position and check distance
+    # We'll update ALL positions for that MAC (not just latest) to keep history consistent
+    external_aps = ap_macs - placed
+    print(f"Checking {len(external_aps)} non-placed APs ({len(placed)} internal/placed)...")
+
+    m_per_deg_lat = EARTH_RADIUS_M * math.pi / 180
+    m_per_deg_lon = m_per_deg_lat * math.cos(math.radians(ref_lat))
+    fixed = 0
+
+    for mac in external_aps:
+        # Get all computed (non-manual) positions for this AP
+        cur.execute("""
+            SELECT id, x_pos, y_pos FROM device_positions
+            WHERE mac = %s AND method != 'manual'
+        """, (mac,))
+        rows = cur.fetchall()
+        for row in rows:
+            lat, lon = float(row["x_pos"]), float(row["y_pos"])
+            dist = haversine_distance(lat, lon, ref_lat, ref_lon)
+            if dist < min_dist and dist > 0.1:
+                scale = min_dist / dist
+                dlat_m = (lat - ref_lat) * m_per_deg_lat
+                dlon_m = (lon - ref_lon) * m_per_deg_lon
+                new_lat = ref_lat + dlat_m * scale / m_per_deg_lat
+                new_lon = ref_lon + dlon_m * scale / m_per_deg_lon
+                cur.execute(
+                    "UPDATE device_positions SET x_pos = %s, y_pos = %s WHERE id = %s",
+                    (new_lat, new_lon, row["id"])
+                )
+                fixed += 1
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f"Fixed {fixed} position rows for non-placed APs")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -487,12 +662,18 @@ def main():
     parser.add_argument("--interval", type=int, default=30,
                         help="Cycle interval in seconds (default: 30)")
     parser.add_argument("--once", action="store_true", help="Run once and exit")
+    parser.add_argument("--fix-aps", action="store_true",
+                        help="Push all non-placed AP positions outside house perimeter and exit")
     args = parser.parse_args()
 
     print("=== Triangulation Engine ===")
     print(f"DB: {DB_CONFIG['host']}/{DB_CONFIG['database']}")
     print(f"Interval: {args.interval}s")
     print()
+
+    if args.fix_aps:
+        fix_existing_ap_positions()
+        return
 
     if args.once:
         conn = mysql.connector.connect(**DB_CONFIG)

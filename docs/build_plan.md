@@ -12,8 +12,9 @@ scanner with GPS, and visualize everything on a property map.
 ### air_scan
 - Collects WiFi probe requests and beacon frames via scapy (monitor mode)
 - Two scanner types: `wifi_scanner.py` (direct scapy on Pi5) and `pull_scanner.py` (OpenWrt pull)
-- Stores MAC, signal_dbm, channel, freq, scanner_host in MySQL (`wireless` DB)
+- Stores MAC, signal_dbm, channel, freq, scanner_host, probe_count in MySQL (`wireless` DB)
 - 10-second UTC-aligned snapshots for cross-scanner comparison
+- Each snapshot includes `probe_count` — the number of raw packets seen for that device during the window
 - Offline JSONL buffering when DB is unreachable
 
 ### port_scan

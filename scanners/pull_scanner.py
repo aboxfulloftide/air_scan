@@ -102,7 +102,7 @@ def mac_is_randomized(mac):
 
 def get_manufacturer(mac):
     try:
-        m = conf.manufdb.get_manuf(mac)
+        m = conf.manufdb._get_manuf(mac)
         return m if m else None
     except: return None
 
@@ -325,9 +325,11 @@ def dedup_observations(observations):
 
         if key not in best:
             obs["ts"] = slot_ts
+            obs["probe_count"] = 1
             best[key] = obs
         else:
             existing = best[key]
+            existing["probe_count"] = existing.get("probe_count", 1) + 1
             # Keep the most recent signal reading within the slot
             if obs["ts"] > existing["ts"]:
                 existing["signal"] = obs["signal"]
@@ -374,6 +376,7 @@ def obs_to_jsonl(obs):
         "vendor_ouis": list(obs.get("vendor_ouis", set())),
         "oui": obs.get("oui"), "is_randomized": obs.get("is_randomized", False),
         "manufacturer": obs.get("manufacturer"),
+        "probe_count": obs.get("probe_count", 1),
     }
 
 
@@ -474,10 +477,11 @@ def flush_to_db(observations):
         cur.executemany("""
             INSERT INTO observations
                 (mac, interface, scanner_host, signal_dbm, channel,
-                 freq_mhz, channel_flags, recorded_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                 freq_mhz, channel_flags, probe_count, recorded_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, [(o["mac"], o["interface"], o["host"], o["signal"], o["channel"],
-               o.get("freq_mhz"), o.get("channel_flags"), o["ts"]) for o in batch])
+               o.get("freq_mhz"), o.get("channel_flags"), o.get("probe_count", 1),
+               o["ts"]) for o in batch])
 
         conn.commit()
         cur.close()

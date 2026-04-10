@@ -31,7 +31,7 @@
 #define MAX_OBS         500
 
 // ── Firmware version ──────────────────────────────────────────────────────────
-#define FIRMWARE_VERSION "1.1.0"
+#define FIRMWARE_VERSION "1.2.0"
 
 // ── Channels ─────────────────────────────────────────────────────────────────
 // Standard ESP32: 2.4 GHz only

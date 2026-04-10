@@ -30,6 +30,7 @@ struct LiveEntry {
     uint8_t  device_type;   // 0=AP 1=Client
     bool     ht, vht;
     bool     active;
+    uint16_t probe_count;   // raw packets seen this window
     time_t   slot_ts;
 };
 
@@ -41,6 +42,7 @@ struct ObsEntry {
     char     ssid[33];
     uint8_t  device_type;
     bool     ht, vht;
+    uint16_t probe_count;   // raw packets seen during the 10s window
     time_t   recorded_at;
 };
 
@@ -132,6 +134,7 @@ static void take_snapshot(time_t slot_ts) {
         o.device_type = live[i].device_type;
         o.ht          = live[i].ht;
         o.vht         = live[i].vht;
+        o.probe_count = live[i].probe_count;
         o.recorded_at = slot_ts;
         strncpy(o.ssid, live[i].ssid, 32);
         o.ssid[32] = '\0';
@@ -194,8 +197,10 @@ static void IRAM_ATTR pkt_callback(void *buf, wifi_promiscuous_pkt_type_t type) 
         live[idx].device_type = dev_type;
         live[idx].ht          = ht;
         live[idx].vht         = vht;
+        live[idx].probe_count = 1;
         strncpy(live[idx].ssid, ssid, 32);
     } else {
+        live[idx].probe_count++;
         // Keep highest RSSI in window
         if (rssi > live[idx].signal) {
             live[idx].signal   = rssi;
@@ -350,6 +355,7 @@ static void flush_to_api() {
         obj["ht"]          = o.ht;
         obj["vht"]         = o.vht;
         obj["he"]          = false;
+        obj["probe_count"] = o.probe_count;
         obj["interface"]   = SCAN_IFACE;
         obj["recorded_at"] = ts_str;
     }

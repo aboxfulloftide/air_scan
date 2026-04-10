@@ -128,6 +128,12 @@ export default function Scanners() {
               <span className="text-gray-300">{s.z_pos ? `${parseFloat(s.z_pos)} ft` : 'Ground level'}</span>
               <span className="text-gray-500">Obs (10m)</span>
               <span className="text-gray-300">{s.recent_obs ?? '-'}</span>
+              <span className="text-gray-500">Devices (10m)</span>
+              <span className="text-gray-300">{s.device_count ?? '-'}</span>
+              <span className="text-gray-500">Total Probes (10m)</span>
+              <span className="text-gray-300">{s.total_probes ?? '-'}</span>
+              <span className="text-gray-500">Avg probes/device</span>
+              <span className="text-gray-300">{s.avg_probes_per_device != null ? s.avg_probes_per_device : '-'}</span>
             </div>
           </div>
         ))}

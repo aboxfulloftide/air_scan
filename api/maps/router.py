@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from api.db import get_db
@@ -92,13 +92,20 @@ async def create_zone(body: dict, db: AsyncSession = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @router.get("/positions")
-async def get_computed_positions(db: AsyncSession = Depends(get_db)):
-    """Latest computed position per MAC from the last 5 minutes.
+async def get_computed_positions(
+    hours: float = Query(3, description="How far back to look for positions (hours). 0 = all time."),
+    db: AsyncSession = Depends(get_db),
+):
+    """Latest computed position per MAC.
 
     Excludes manual and fixed positions (those have /aps and /devices/fixed).
     Joins with device + known_device info for labels.
     """
-    r = await db.execute(text("""
+    time_filter = "AND dp.computed_at >= NOW() - INTERVAL :minutes MINUTE" if hours > 0 else ""
+    time_filter_inner = "AND computed_at >= NOW() - INTERVAL :minutes MINUTE" if hours > 0 else ""
+    params = {"minutes": int(hours * 60)} if hours > 0 else {}
+
+    r = await db.execute(text(f"""
         SELECT dp.mac, dp.x_pos AS lat, dp.y_pos AS lon, dp.floor,
                dp.confidence, dp.method, dp.scanner_count, dp.computed_at,
                d.device_type, d.manufacturer, d.oui,
@@ -109,11 +116,14 @@ async def get_computed_positions(db: AsyncSession = Depends(get_db)):
         LEFT JOIN known_devices kd ON kd.mac = dp.mac
         LEFT JOIN ssids s ON s.mac = dp.mac AND s.ssid REGEXP '^[[:print:]]+$' AND CHAR_LENGTH(s.ssid) BETWEEN 1 AND 32
         WHERE dp.method NOT IN ('manual', 'fixed')
-          AND dp.computed_at >= NOW() - INTERVAL 5 MINUTE
+          {time_filter}
+          AND dp.mac NOT IN (
+              SELECT DISTINCT mac FROM device_positions WHERE method IN ('manual', 'fixed')
+          )
           AND dp.id IN (
               SELECT MAX(id) FROM device_positions
               WHERE method NOT IN ('manual', 'fixed')
-                AND computed_at >= NOW() - INTERVAL 5 MINUTE
+                {time_filter_inner}
               GROUP BY mac
           )
         GROUP BY dp.mac, dp.x_pos, dp.y_pos, dp.floor,
@@ -121,7 +131,7 @@ async def get_computed_positions(db: AsyncSession = Depends(get_db)):
                  d.device_type, d.manufacturer, d.oui,
                  kd.label, kd.owner, kd.status
         ORDER BY dp.confidence DESC
-    """))
+    """), params)
     return [dict(row) for row in r.mappings().all()]
 
 

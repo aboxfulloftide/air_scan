@@ -21,7 +21,7 @@ async def list_devices(
     order: str = Query("desc"),
     db: AsyncSession = Depends(get_db),
 ):
-    allowed_sorts = {"last_seen", "first_seen", "mac", "manufacturer"}
+    allowed_sorts = {"last_seen", "first_seen", "mac", "manufacturer", "probes"}
     if sort not in allowed_sorts:
         sort = "last_seen"
     if order not in ("asc", "desc"):
@@ -86,32 +86,44 @@ async def list_devices(
     r = await db.execute(text(count_sql), params)
     total = r.scalar()
 
+    sort_col = {
+        "last_seen": "d.last_seen",
+        "first_seen": "d.first_seen",
+        "mac": "d.mac",
+        "manufacturer": "d.manufacturer",
+        "probes": "COALESCE(probe_agg.probe_count, 0)",
+    }[sort]
+
     base_select = f"""
         SELECT d.mac, d.device_type, d.oui, d.manufacturer, d.is_randomized,
                d.ht_capable, d.vht_capable, d.he_capable,
                d.first_seen, d.last_seen,
                kd.status as known_status,
-               COALESCE(
-                   kd.label,
-                   (
-                       SELECT kd2.label
-                       FROM known_devices kd2
-                       WHERE kd2.port_scan_host_id = kd.port_scan_host_id
-                         AND kd2.label IS NOT NULL
-                         AND kd2.label != ''
-                       ORDER BY kd2.synced_at DESC
-                       LIMIT 1
-                   )
-               ) as known_label,
+               COALESCE(kd.label, host_label.label) as known_label,
                kd.owner,
-               kd.is_fixed
+               kd.is_fixed,
+               COALESCE(probe_agg.probe_count, 0) AS probe_count
         FROM devices d
         LEFT JOIN known_devices kd ON d.mac = kd.mac
+        LEFT JOIN (
+            SELECT port_scan_host_id, MAX(label) AS label
+            FROM known_devices
+            WHERE port_scan_host_id IS NOT NULL
+              AND label IS NOT NULL AND label != ''
+            GROUP BY port_scan_host_id
+        ) host_label ON host_label.port_scan_host_id = kd.port_scan_host_id
+            AND kd.label IS NULL
+        LEFT JOIN (
+            SELECT mac, SUM(probe_count) AS probe_count
+            FROM observations
+            WHERE recorded_at >= UTC_TIMESTAMP() - INTERVAL 10 MINUTE
+            GROUP BY mac
+        ) probe_agg ON probe_agg.mac = d.mac
     """
     data_sql = (
         base_select + f"""
         {where}
-        ORDER BY d.{sort} {order}
+        ORDER BY {sort_col} {order}
         LIMIT :limit OFFSET :offset
         """
         if not search or exact_mac
@@ -121,8 +133,9 @@ async def list_devices(
         GROUP BY d.mac, d.device_type, d.oui, d.manufacturer, d.is_randomized,
                  d.ht_capable, d.vht_capable, d.he_capable,
                  d.first_seen, d.last_seen,
-                 kd.status, kd.label, kd.owner, kd.is_fixed, kd.port_scan_host_id
-        ORDER BY d.{sort} {order}
+                 kd.status, kd.label, kd.owner, kd.is_fixed, kd.port_scan_host_id,
+                 host_label.label, probe_agg.probe_count
+        ORDER BY {sort_col} {order}
         LIMIT :limit OFFSET :offset
         """
     )
@@ -166,6 +179,7 @@ async def list_devices(
 
     for device in devices:
         device["ssids"] = ssids_by_mac.get(device["mac"])
+        device["probes_per_min"] = round(float(device.pop("probe_count", 0)) / 10.0, 1)
         pos = pos_by_mac.get(device["mac"])
         device["has_position"] = pos is not None
         if pos:
@@ -219,11 +233,31 @@ async def get_device(mac: str, db: AsyncSession = Depends(get_db)):
     """), {"mac": mac})
     signal_history = [dict(r) for r in r4.mappings().all()]
 
+    # Probe frequency: total raw probes per scanner over last 10 minutes
+    r5 = await db.execute(text("""
+        SELECT scanner_host,
+               SUM(probe_count) AS total_probes,
+               ROUND(SUM(probe_count) / 10.0, 1) AS probes_per_min
+        FROM observations
+        WHERE mac = :mac AND recorded_at >= UTC_TIMESTAMP() - INTERVAL 10 MINUTE
+        GROUP BY scanner_host
+    """), {"mac": mac})
+    probe_rate = {row["scanner_host"]: round(float(row["probes_per_min"]), 1)
+                  for row in r5.mappings().all()}
+    # Total across all scanners
+    r5b = await db.execute(text("""
+        SELECT ROUND(SUM(probe_count) / 10.0, 1) AS probes_per_min
+        FROM observations
+        WHERE mac = :mac AND recorded_at >= UTC_TIMESTAMP() - INTERVAL 10 MINUTE
+    """), {"mac": mac})
+    total_probes = round(float(r5b.scalar() or 0), 1)
+
     return {
         "device": dict(device),
         "ssids": ssids,
         "observations": observations,
         "signal_history": signal_history,
+        "probe_rate": {"total": total_probes, "per_scanner": probe_rate},
     }
 
 

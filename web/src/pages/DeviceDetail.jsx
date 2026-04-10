@@ -1,4 +1,4 @@
-import { useParams } from 'react-router-dom'
+import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import api from '../api/client'
@@ -42,12 +42,20 @@ export default function DeviceDetail() {
           <h2 className="text-xl font-bold text-white font-mono">{mac}</h2>
           {d.known_label && <p className="text-gray-400">{d.known_label}</p>}
         </div>
-        <button
-          onClick={() => setClassifyOpen(!classifyOpen)}
-          className="bg-gray-800 text-white text-sm px-4 py-2 rounded-lg hover:bg-gray-700"
-        >
-          Classify
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            to={`/map?device=${encodeURIComponent(mac)}`}
+            className="bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-500"
+          >
+            View on Map
+          </Link>
+          <button
+            onClick={() => setClassifyOpen(!classifyOpen)}
+            className="bg-gray-800 text-white text-sm px-4 py-2 rounded-lg hover:bg-gray-700"
+          >
+            Classify
+          </button>
+        </div>
       </div>
 
       {classifyOpen && (
@@ -91,6 +99,27 @@ export default function DeviceDetail() {
               <>
                 <span className="text-gray-500">Port Scan Host</span>
                 <span className="text-blue-400">#{d.port_scan_host_id}</span>
+              </>
+            )}
+            <span className="text-gray-500">Probe Rate</span>
+            <span className="text-white">
+              {data.probe_rate?.total > 0 ? (
+                <span className={`font-mono ${data.probe_rate.total >= 10 ? 'text-emerald-400' : data.probe_rate.total >= 2 ? 'text-yellow-400' : 'text-gray-400'}`}>
+                  {data.probe_rate.total}/min
+                </span>
+              ) : <span className="text-gray-600">inactive</span>}
+            </span>
+            {data.probe_rate?.per_scanner && Object.keys(data.probe_rate.per_scanner).length > 0 && (
+              <>
+                <span className="text-gray-500">Per Scanner</span>
+                <div className="space-y-0.5">
+                  {Object.entries(data.probe_rate.per_scanner).sort((a, b) => b[1] - a[1]).map(([host, rate]) => (
+                    <div key={host} className="flex justify-between text-xs">
+                      <span className="text-gray-400 font-mono">{host}</span>
+                      <span className="text-gray-300 font-mono">{rate}/min</span>
+                    </div>
+                  ))}
+                </div>
               </>
             )}
           </div>

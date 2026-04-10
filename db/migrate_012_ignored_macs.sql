@@ -1,0 +1,7 @@
+-- Persistent ignore list for mobile map
+CREATE TABLE IF NOT EXISTS ignored_macs (
+    mac VARCHAR(17) NOT NULL PRIMARY KEY,
+    ssids TEXT DEFAULT NULL,
+    reason VARCHAR(255) DEFAULT NULL,
+    ignored_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

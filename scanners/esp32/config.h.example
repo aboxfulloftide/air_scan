@@ -31,15 +31,7 @@
 #define MAX_OBS         500
 
 // ── Firmware version ──────────────────────────────────────────────────────────
-// v1.1.1 — 2026-03-19
-//   Fix: re-register promiscuous RX callback in hop_channel() band-change block.
-//   On ESP32-C5, toggling promiscuous mode during a 2.4↔5 GHz hop clears the
-//   callback — symptom is live:0 buf:0 permanently after first band switch.
-// v1.1.0 — 2026-03-17
-//   Add dual-band 2.4+5 GHz scanning (ESP32-C5). Add health stats, bench
-//   timing, NTP throttle. Fix: re-register promiscuous RX callback inside
-//   wifi_disconnect_and_resume() — WiFi mode cycling clears it.
-#define FIRMWARE_VERSION "1.1.1"
+#define FIRMWARE_VERSION "1.2.0"
 
 // ── Channels ─────────────────────────────────────────────────────────────────
 // Standard ESP32: 2.4 GHz only

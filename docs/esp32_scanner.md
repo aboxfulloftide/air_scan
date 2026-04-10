@@ -2,7 +2,10 @@
 
 Each ESP32 acts as a fixed-location passive WiFi scanner. It sniffs beacon and
 probe-request frames in promiscuous mode, buffers observations in RAM, then
-reconnects to WiFi every 60 seconds to POST the data to the API.
+reconnects to WiFi every 60 seconds to POST the data to the API. Each
+observation includes a `probe_count` — the number of raw packets seen for that
+device during the 10-second window — so the server can measure true probe
+activity without needing access to raw packet streams.
 
 ---
 
@@ -76,7 +79,7 @@ machine and edit `config.h` before flashing.
 #define MAX_OBS         500   // max observations held in RAM before oldest dropped
 
 // ── Firmware version ──────────────────────────────────────────────────────────
-#define FIRMWARE_VERSION "1.1.0"   // bump when flashing a new build for OTA tracking
+#define FIRMWARE_VERSION "1.2.0"   // bump when flashing a new build for OTA tracking
 
 // ── Channels ──────────────────────────────────────────────────────────────────
 #define DUAL_BAND       0     // 0 = 2.4 GHz only, 1 = dual-band (ESP32-C5 only)
@@ -137,7 +140,7 @@ If you see `[API] POST 200` the device is fully working.
 | `[NTP] Syncing... OK` | Clock synced — timestamps will be correct |
 | `[SCAN] Started on channel N` | Promiscuous capture running |
 | `[HOP] chN` | Channel changed |
-| `[timestamp] chN \| live:X buf:Y` | Every 10s: X devices seen this window, Y total buffered |
+| `[timestamp] chN \| live:X buf:Y` | Every 10s: X devices seen this window, Y total buffered. Each buffered entry includes a probe_count of raw packets per device. |
 | `[FLUSH] N observations` | About to upload; WiFi reconnect in progress |
 | `[API] POST 200` | Upload succeeded |
 | `[API] POST failed` | Can't reach API — check network/API_HOST |

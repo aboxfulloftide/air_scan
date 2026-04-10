@@ -143,10 +143,66 @@ def sync(sqlite_path, dry_run=False):
     else:
         ble_select = ", NULL, NULL, NULL, NULL, NULL"
 
+    # Build session merge map: WiFi + BLE sessions from the same host that overlap
+    # in time get the same canonical session_id.  Two merge criteria:
+    #   1. Sessions starting within 60s of each other
+    #   2. Sessions with overlapping observation time windows
+    all_sessions = src.execute("""
+        SELECT s.id, s.scanner_host, s.started_at, s.ended_at,
+               MIN(o.recorded_at) AS first_obs, MAX(o.recorded_at) AS last_obs
+        FROM sessions s
+        LEFT JOIN observations o ON o.session_id = s.id
+        GROUP BY s.id
+        ORDER BY s.scanner_host, s.started_at
+    """).fetchall()
+
+    session_canonical = {}  # local session id -> canonical "host:started_at" string
+    # Group by host, then merge overlapping/adjacent sessions
+    by_host = {}
+    for s in all_sessions:
+        host = s["scanner_host"]
+        if host not in by_host:
+            by_host[host] = []
+        by_host[host].append(s)
+
+    for host, slist in by_host.items():
+        slist.sort(key=lambda x: x["started_at"])
+        # Track merge groups: each group has a canonical session and a time range
+        groups = []  # [(canonical_session, range_start, range_end)]
+        for s in slist:
+            try:
+                t_start = datetime.fromisoformat(s["started_at"])
+            except (ValueError, TypeError):
+                session_canonical[s["id"]] = f"{host}:{s['started_at']}"
+                continue
+            # Observation window (if any obs exist)
+            obs_start = datetime.fromisoformat(s["first_obs"]) if s["first_obs"] else t_start
+            obs_end = datetime.fromisoformat(s["last_obs"]) if s["last_obs"] else t_start
+            range_start = min(t_start, obs_start)
+            range_end = max(t_start, obs_end)
+
+            merged = False
+            for g in groups:
+                g_canon, g_start, g_end = g
+                # Merge if start times within 60s OR observation windows overlap
+                starts_close = abs((t_start - datetime.fromisoformat(g_canon["started_at"])).total_seconds()) <= 60
+                overlaps = range_start <= g_end and range_end >= g_start
+                if starts_close or overlaps:
+                    session_canonical[s["id"]] = session_canonical[g_canon["id"]]
+                    # Expand the group's time range
+                    g[1] = min(g_start, range_start)
+                    g[2] = max(g_end, range_end)
+                    merged = True
+                    break
+
+            if not merged:
+                session_canonical[s["id"]] = f"{host}:{s['started_at']}"
+                groups.append([s, range_start, range_end])
+
     rows = src.execute(f"""
         SELECT
             o.id        AS obs_id,
-            (s.scanner_host || ':' || s.started_at) AS session_id,
+            o.session_id AS local_session_id,
             o.mac,
             o.interface,
             o.scanner_host,
@@ -169,7 +225,6 @@ def sync(sqlite_path, dry_run=False):
             d.last_seen
         FROM observations o
         JOIN devices d ON d.mac = o.mac
-        JOIN sessions s ON s.id = o.session_id
         WHERE o.synced = 0
         ORDER BY o.recorded_at
     """).fetchall()
@@ -252,11 +307,16 @@ def sync(sqlite_path, dry_run=False):
 
     obs_batch = []
     for row in rows:
+        # Map local session integer to canonical merged session_id string
+        canonical_sid = session_canonical.get(
+            row["local_session_id"],
+            f"{row['scanner_host']}:{row['recorded_at']}"  # fallback
+        )
         obs_batch.append((
             row["mac"], row["interface"], row["scanner_host"],
             row["signal_dbm"], row["channel"], row["freq_mhz"], row["channel_flags"],
             row["gps_lat"], row["gps_lon"], row["gps_fix"],
-            row["session_id"], row["recorded_at"],
+            canonical_sid, row["recorded_at"],
             row["manufacturer_data"], row["adv_services"], row["tx_power"],
             row["adv_service_data"], row["tracker_type"],
         ))

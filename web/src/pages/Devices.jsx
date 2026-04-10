@@ -31,9 +31,11 @@ export default function Devices() {
   const deviceType = searchParams.get('type') || ''
   const status = searchParams.get('status') || ''
   const mapped = searchParams.get('mapped') || ''
+  const sortBy = searchParams.get('sort') || 'last_seen'
+  const sortOrder = searchParams.get('order') || 'desc'
 
   const { data, isLoading } = useQuery({
-    queryKey: ['devices', page, deviceType, status, mapped, searchParams.get('search')],
+    queryKey: ['devices', page, deviceType, status, mapped, searchParams.get('search'), sortBy, sortOrder],
     queryFn: () =>
       api
         .get('/devices/', {
@@ -44,11 +46,25 @@ export default function Devices() {
             status: status || undefined,
             mapped: mapped || undefined,
             search: searchParams.get('search') || undefined,
+            sort: sortBy,
+            order: sortOrder,
           },
         })
         .then((r) => r.data),
     refetchInterval: 30000,
   })
+
+  const toggleSort = (field) => {
+    const p = new URLSearchParams(searchParams)
+    if (sortBy === field) {
+      p.set('order', sortOrder === 'desc' ? 'asc' : 'desc')
+    } else {
+      p.set('sort', field)
+      p.set('order', 'desc')
+    }
+    p.set('page', '1')
+    setSearchParams(p)
+  }
 
   const handleSearch = (e) => {
     e.preventDefault()
@@ -149,7 +165,12 @@ export default function Devices() {
                 <th className="text-left px-4 py-3 font-medium">SSIDs</th>
                 <th className="text-left px-4 py-3 font-medium">Status</th>
                 <th className="text-left px-4 py-3 font-medium">Capabilities</th>
-                <th className="text-left px-4 py-3 font-medium">Last Seen</th>
+                <th className="text-left px-4 py-3 font-medium cursor-pointer hover:text-white select-none" onClick={() => toggleSort('probes')}>
+                  Probes/min {sortBy === 'probes' && (sortOrder === 'desc' ? '\u25BC' : '\u25B2')}
+                </th>
+                <th className="text-left px-4 py-3 font-medium cursor-pointer hover:text-white select-none" onClick={() => toggleSort('last_seen')}>
+                  Last Seen {sortBy === 'last_seen' && (sortOrder === 'desc' ? '\u25BC' : '\u25B2')}
+                </th>
                 <th className="text-left px-4 py-3 font-medium">Map</th>
               </tr>
             </thead>
@@ -177,6 +198,13 @@ export default function Devices() {
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-400">
                     {[d.he_capable && 'WiFi 6', d.vht_capable && 'ac', d.ht_capable && 'n'].filter(Boolean).join(', ') || '-'}
+                  </td>
+                  <td className="px-4 py-3 text-xs font-mono">
+                    {d.probes_per_min > 0 ? (
+                      <span className={d.probes_per_min >= 10 ? 'text-emerald-400' : d.probes_per_min >= 2 ? 'text-yellow-400' : 'text-gray-500'}>
+                        {d.probes_per_min}
+                      </span>
+                    ) : <span className="text-gray-700">-</span>}
                   </td>
                   <td className="px-4 py-3 text-gray-400 text-xs">{timeAgo(d.last_seen)}</td>
                   <td className="px-4 py-3">
