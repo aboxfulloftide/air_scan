@@ -9,7 +9,7 @@ USE wireless;
 
 CREATE TABLE IF NOT EXISTS devices (
     mac             VARCHAR(17) NOT NULL PRIMARY KEY,
-    device_type     ENUM('AP', 'Client') NOT NULL,
+    device_type     ENUM('AP', 'Client', 'BLE') NOT NULL,
     oui             CHAR(8),
     manufacturer    VARCHAR(64),
     is_randomized   TINYINT(1) NOT NULL DEFAULT 0,
@@ -35,12 +35,18 @@ CREATE TABLE IF NOT EXISTS observations (
     freq_mhz        SMALLINT UNSIGNED,
     channel_flags   VARCHAR(40),
     probe_count     SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+    manufacturer_data VARCHAR(512) NULL COMMENT 'BLE manufacturer data hex',
+    adv_services      VARCHAR(512) NULL COMMENT 'BLE advertised service UUIDs',
+    adv_service_data  VARCHAR(512) NULL COMMENT 'BLE service data UUID:<hex>',
+    tx_power          TINYINT      NULL COMMENT 'BLE TX power (dBm)',
+    tracker_type      VARCHAR(32)  NULL COMMENT 'Tracker type (Apple:FindMy, Google FMDN, etc.)',
     recorded_at     DATETIME NOT NULL,
     PRIMARY KEY (id, recorded_at),
     INDEX idx_mac (mac),
     INDEX idx_recorded_at (recorded_at),
     INDEX idx_scanner_host (scanner_host),
-    INDEX idx_observations_recorded_signal (recorded_at, signal_dbm, mac, scanner_host)
+    INDEX idx_observations_recorded_signal (recorded_at, signal_dbm, mac, scanner_host),
+    INDEX idx_observations_tracker (tracker_type)
 ) PARTITION BY RANGE (TO_DAYS(recorded_at)) (
     PARTITION p_future VALUES LESS THAN MAXVALUE
 );

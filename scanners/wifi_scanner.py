@@ -33,8 +33,17 @@ if _env_file.exists():
                 val = val.strip().strip('"').strip("'")
                 os.environ.setdefault(key.strip(), val)
 
+import asyncio
 import mysql.connector
 from scapy.all import sniff, Dot11, Dot11Beacon, Dot11ProbeReq, Dot11Elt, RadioTap, conf
+
+try:
+    from bleak import BleakScanner
+    HAS_BLEAK = True
+except ImportError:
+    HAS_BLEAK = False
+
+from ble_classify import classify_tracker
 
 # ---------------------------------------------------------------------------
 # Config
@@ -54,6 +63,9 @@ DB = {
     "database":     os.environ.get("DB_NAME", "wireless"),
     "ssl_disabled": os.environ.get("DB_SSL", "disabled").lower() == "disabled",
 }
+
+BLE_IFACE         = os.environ.get("BLE_IFACE", "hci0")
+BLE_ENABLED       = HAS_BLEAK and os.environ.get("BLE_SCAN", "1") != "0"
 
 BAND_FREQS = {
     "2.4": [2412, 2437, 2462],
@@ -169,6 +181,11 @@ seen                 = {}
 live                 = {}
 pending_observations = []
 current_band         = {"band": "?", "freq": 0}
+
+# BLE state — separate dicts, shared lock
+ble_seen = {}
+ble_live = {}
+ble_stats = {"total": 0, "trackers": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +387,128 @@ def channel_hopper(schedule, slots_per_band):
 
 
 # ---------------------------------------------------------------------------
+# BLE scanner
+# ---------------------------------------------------------------------------
+
+def ble_mac_is_randomized(mac):
+    """BLE random addresses have bit 6 of first byte set."""
+    try:    return bool(int(mac.split(":")[0], 16) & 0x40)
+    except: return False
+
+
+def on_ble_advertisement(device, adv_data):
+    """Called by bleak for every BLE advertisement received."""
+    mac  = device.address.lower()
+    rssi = adv_data.rssi
+    ts   = now_utc()
+
+    # Manufacturer data: encode as "XXXX:<hex>" per entry
+    mfr_dict  = adv_data.manufacturer_data or {}
+    mfr_parts = [f"{cid:04X}:{d.hex()}" for cid, d in mfr_dict.items()]
+    mfr_str   = ",".join(mfr_parts) if mfr_parts else None
+
+    # Advertised service UUIDs
+    svc_uuids = adv_data.service_uuids or []
+    svc_str   = ",".join(str(u) for u in svc_uuids) or None
+
+    # Service data (UUID -> bytes payload)
+    svc_data_dict  = adv_data.service_data or {}
+    svc_data_parts = [f"{uuid}:{data.hex()}" for uuid, data in svc_data_dict.items()]
+    svc_data_str   = ",".join(svc_data_parts) if svc_data_parts else None
+
+    tx_power = adv_data.tx_power
+    tracker  = classify_tracker(mfr_dict, svc_uuids, svc_data_dict)
+    name     = adv_data.local_name or ""
+
+    randomized = ble_mac_is_randomized(mac)
+    oui        = get_oui(mac)
+
+    with lock:
+        if mac not in ble_seen:
+            ble_seen[mac] = {
+                "type":          "BLE",
+                "first_seen":    ts,
+                "last_seen":     ts,
+                "oui":           oui,
+                "manufacturer":  get_manufacturer(mac),
+                "is_randomized": randomized,
+                "names":         set(),
+                "tracker_type":  tracker,
+            }
+            ble_stats["total"] += 1
+            if tracker:
+                ble_stats["trackers"] += 1
+                print(f"\n[BLE TRACKER] {tracker:20s}  {mac}  rssi={rssi}")
+        dev = ble_seen[mac]
+        dev["last_seen"] = ts
+        if tracker and not dev.get("tracker_type"):
+            dev["tracker_type"] = tracker
+            ble_stats["trackers"] += 1
+            print(f"\n[BLE TRACKER] {tracker:20s}  {mac}  rssi={rssi}")
+        if name:
+            dev["names"].add(name)
+
+        if mac not in ble_live:
+            ble_live[mac] = {
+                "signal":            rssi,
+                "last_heard":        ts,
+                "manufacturer_data": mfr_str,
+                "adv_services":      svc_str,
+                "adv_service_data":  svc_data_str,
+                "tx_power":          tx_power,
+                "tracker_type":      tracker or dev.get("tracker_type"),
+                "names":             set(),
+                "oui":               oui,
+                "is_randomized":     randomized,
+                "manufacturer":      dev["manufacturer"],
+            }
+        else:
+            if rssi is not None:
+                if ble_live[mac]["signal"] is None or rssi > ble_live[mac]["signal"]:
+                    ble_live[mac]["signal"] = rssi
+            ble_live[mac]["last_heard"] = ts
+            if mfr_str and not ble_live[mac]["manufacturer_data"]:
+                ble_live[mac]["manufacturer_data"] = mfr_str
+            if svc_str:
+                existing = ble_live[mac]["adv_services"] or ""
+                new_svcs = set(existing.split(",")) | set(svc_str.split(","))
+                new_svcs.discard("")
+                ble_live[mac]["adv_services"] = ",".join(sorted(new_svcs)) or None
+            if svc_data_str and not ble_live[mac]["adv_service_data"]:
+                ble_live[mac]["adv_service_data"] = svc_data_str
+            if tx_power is not None and ble_live[mac]["tx_power"] is None:
+                ble_live[mac]["tx_power"] = tx_power
+            if tracker and not ble_live[mac].get("tracker_type"):
+                ble_live[mac]["tracker_type"] = tracker
+
+        if name:
+            ble_live[mac]["names"].add(name)
+
+
+async def _ble_scan_async():
+    """Run bleak BLE scanner indefinitely."""
+    scanner = BleakScanner(
+        detection_callback=on_ble_advertisement,
+        adapter=BLE_IFACE,
+        scanning_mode="active",
+    )
+    async with scanner:
+        print(f"[BLE] Scanning on {BLE_IFACE} (active mode)")
+        while True:
+            await asyncio.sleep(3600)
+
+
+def ble_scan_thread():
+    """Run the async BLE scanner in its own event loop / thread."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_ble_scan_async())
+    except Exception as e:
+        print(f"\n[BLE ERROR] {e}")
+
+
+# ---------------------------------------------------------------------------
 # Snapshot thread
 # ---------------------------------------------------------------------------
 
@@ -380,6 +519,7 @@ def snapshot_thread():
         window_start = ts.timestamp() - SLOT_SECONDS
 
         with lock:
+            # WiFi snapshot
             snap = {
                 mac: dict(v) for mac, v in live.items()
                 if v["last_heard"].timestamp() >= window_start
@@ -387,6 +527,14 @@ def snapshot_thread():
             # Reset probe counts for next window
             for v in live.values():
                 v["probe_count"] = 0
+
+            # BLE snapshot
+            ble_snap = {
+                mac: dict(v, names=set(v.get("names", set())))
+                for mac, v in ble_live.items()
+                if v["last_heard"].timestamp() >= window_start
+            }
+            ble_live.clear()
 
         for mac, s in snap.items():
             pending_observations.append({
@@ -402,10 +550,33 @@ def snapshot_thread():
                 "probe_count": s.get("probe_count", 1),
             })
 
+        # BLE observations
+        for mac, s in ble_snap.items():
+            pending_observations.append({
+                "mac": mac, "type": "BLE",
+                "interface": BLE_IFACE, "host": HOSTNAME,
+                "signal": s["signal"], "channel": 37,
+                "freq_mhz": 2402, "channel_flags": None,
+                "ts": ts, "ssids": s.get("names", set()),
+                "ht": False, "vht": False, "he": False,
+                "vendor_ouis": set(),
+                "oui": s.get("oui"), "is_randomized": s.get("is_randomized", False),
+                "manufacturer": s.get("manufacturer"),
+                "probe_count": 1,
+                "manufacturer_data": s.get("manufacturer_data"),
+                "adv_services":      s.get("adv_services"),
+                "adv_service_data":  s.get("adv_service_data"),
+                "tx_power":          s.get("tx_power"),
+                "tracker_type":      s.get("tracker_type"),
+            })
+
+        ble_active = len(ble_snap)
+        ble_suffix = f"  BLE: {ble_stats['total']}({ble_active})" if BLE_ENABLED else ""
         print(
             f"\r[{ts.strftime('%H:%M:%S')} UTC]  "
             f"Band: {current_band['band']}GHz @ {current_band['freq']}MHz  |  "
-            f"Devices: {len(seen)}  |  Active: {len(snap)}  |  Pending: {len(pending_observations)}   ",
+            f"WiFi: {len(seen)}({len(snap)}){ble_suffix}  |  "
+            f"Pending: {len(pending_observations)}   ",
             end="", flush=True
         )
         time.sleep(next_boundary(SLOT_SECONDS))
@@ -457,6 +628,11 @@ def obs_to_jsonl(obs):
         "is_randomized": obs.get("is_randomized", False),
         "manufacturer":  obs.get("manufacturer"),
         "probe_count":   obs.get("probe_count", 1),
+        "manufacturer_data": obs.get("manufacturer_data"),
+        "adv_services":      obs.get("adv_services"),
+        "adv_service_data":  obs.get("adv_service_data"),
+        "tx_power":          obs.get("tx_power"),
+        "tracker_type":      obs.get("tracker_type"),
     }
 
 
@@ -572,11 +748,15 @@ def flush_to_db():
             cur.executemany("""
                 INSERT INTO observations
                     (mac, interface, scanner_host, signal_dbm, channel,
-                     freq_mhz, channel_flags, probe_count, recorded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     freq_mhz, channel_flags, probe_count,
+                     manufacturer_data, adv_services, adv_service_data,
+                     tx_power, tracker_type, recorded_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, [(o["mac"], o["interface"], o["host"], o["signal"], o["channel"],
                    o.get("freq_mhz"), o.get("channel_flags"), o.get("probe_count", 1),
-                   o["ts"]) for o in batch])
+                   o.get("manufacturer_data"), o.get("adv_services"),
+                   o.get("adv_service_data"), o.get("tx_power"),
+                   o.get("tracker_type"), o["ts"]) for o in batch])
 
             conn.commit()
             cur.close()
@@ -593,7 +773,8 @@ def flush_to_db():
 # ---------------------------------------------------------------------------
 
 def on_exit(sig, frame):
-    print(f"\n\nShutting down. {len(seen)} total devices seen.")
+    ble_msg = f", {ble_stats['total']} BLE ({ble_stats['trackers']} trackers)" if BLE_ENABLED else ""
+    print(f"\n\nShutting down. {len(seen)} WiFi devices{ble_msg}.")
     sys.exit(0)
 
 
@@ -607,6 +788,7 @@ if __name__ == "__main__":
     print(f"Scanner : {HOSTNAME}/{IFACE}")
     print(f"Bands   : {', '.join(b + 'GHz' for b in bands)}  ({slots_per_band * SLOT_SECONDS}s per band)")
     print(f"Schedule: {schedule}")
+    print(f"BLE     : {'ON (' + BLE_IFACE + ')' if BLE_ENABLED else 'OFF (pip install bleak to enable)'}")
     print(f"Flush   : every {FLUSH_INTERVAL}s | All times UTC")
     print("Ctrl+C to stop\n")
 
@@ -618,5 +800,7 @@ if __name__ == "__main__":
     threading.Thread(target=channel_hopper,  args=(schedule, slots_per_band), daemon=True).start()
     threading.Thread(target=snapshot_thread, daemon=True).start()
     threading.Thread(target=flush_to_db,     daemon=True).start()
+    if BLE_ENABLED:
+        threading.Thread(target=ble_scan_thread, daemon=True).start()
 
     sniff(iface=IFACE, prn=handle_packet, store=False)

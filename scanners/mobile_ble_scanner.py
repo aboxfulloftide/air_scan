@@ -27,6 +27,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ble_classify import classify_tracker
+
 # ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
@@ -341,83 +343,6 @@ BLE_ADV_FREQS    = [2402, 2426, 2480]
 def _adv_type_str(adv_type):
     """Convert bleak AdvertisementData connectable/etc to a short string."""
     # bleak doesn't expose adv_type directly; we derive from connectable
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Tracker classification
-# ---------------------------------------------------------------------------
-
-# Company IDs (little-endian key in bleak's manufacturer_data dict)
-_APPLE_CID   = 0x004C
-_SAMSUNG_CID = 0x0075
-
-# Service UUID -> tracker label (16-bit UUIDs in full 128-bit form)
-_TRACKER_SVCS = {
-    "0000feed-0000-1000-8000-00805f9b34fb": "Tile",
-    "0000fd5a-0000-1000-8000-00805f9b34fb": "Samsung SmartTag",
-    "0000fed8-0000-1000-8000-00805f9b34fb": "Google FMDN",
-    "0000fe2c-0000-1000-8000-00805f9b34fb": "Google FastPair",
-}
-
-# Eddystone (0xFEAA) frame types
-_EDDYSTONE_UUID  = "0000feaa-0000-1000-8000-00805f9b34fb"
-_EDDYSTONE_EID   = 0x40   # Ephemeral Identifier — used by Google FMDN (Moto Tag, etc.)
-_EDDYSTONE_UID   = 0x00
-_EDDYSTONE_URL   = 0x10
-_EDDYSTONE_TLM   = 0x20
-
-def classify_tracker(manufacturer_data, service_uuids, service_data):
-    """
-    Return a short label if the advertisement matches a known tracker type,
-    else None.
-
-    Apple Find My (AirTag, etc.):
-      manufacturer_data[0x004C][0] == 0x12
-
-    Google FMDN (Moto Tag / Moto Tag 2 / Pixel Tag, etc.):
-      Eddystone service UUID 0xFEAA + service data frame type 0x40 (EID).
-      Confirmed from live capture: Moto Tag advertises 0xFEAA/EID, not 0xFED8.
-
-    Tile: service UUID 0xFEED
-    Samsung SmartTag: service UUID 0xFD5A or company 0x0075
-    """
-    # --- Apple ---
-    apple = manufacturer_data.get(_APPLE_CID) if manufacturer_data else None
-    if apple and len(apple) >= 1:
-        t = apple[0]
-        if t == 0x12:
-            return "Apple:FindMy"      # AirTag / Find My accessory
-        if t == 0x02:
-            return "Apple:iBeacon"
-        if t == 0x10:
-            return "Apple:NearbyInfo"  # iPhone / Mac proximity
-        return "Apple"
-
-    # --- Eddystone (0xFEAA) — check frame type in service data ---
-    eddystone_payload = (service_data or {}).get(_EDDYSTONE_UUID)
-    if eddystone_payload and len(eddystone_payload) >= 1:
-        frame = eddystone_payload[0]
-        if frame == _EDDYSTONE_EID:
-            return "Google FMDN"       # Moto Tag, Moto Tag 2, Pixel Tag, etc.
-        if frame == _EDDYSTONE_UID:
-            return "Eddystone-UID"
-        if frame == _EDDYSTONE_URL:
-            return "Eddystone-URL"
-        if frame == _EDDYSTONE_TLM:
-            return "Eddystone-TLM"
-        return "Eddystone"
-
-    # --- Other service UUID based ---
-    for uuid in (service_uuids or []):
-        label = _TRACKER_SVCS.get(uuid.lower())
-        if label:
-            return label
-
-    # --- Samsung manufacturer data fallback ---
-    if manufacturer_data and _SAMSUNG_CID in manufacturer_data:
-        return "Samsung"
-
     return None
 
 
