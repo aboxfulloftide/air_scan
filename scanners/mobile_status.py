@@ -343,7 +343,8 @@ def query_status():
                 d.device_type,
                 d.manufacturer,
                 d.is_randomized,
-                GROUP_CONCAT(DISTINCT s.ssid) AS ssids
+                GROUP_CONCAT(DISTINCT s.ssid) AS ssids,
+                MAX(o.tracker_type) AS tracker_type
             FROM observations o
             LEFT JOIN devices d ON d.mac = o.mac
             LEFT JOIN ssids   s ON s.mac = o.mac AND LENGTH(s.ssid) BETWEEN 1 AND 32
@@ -363,15 +364,16 @@ def query_status():
             if any(s in ignore["ssids"] for s in ssids):
                 continue
             wifi.append({
-                "mac":         row["mac"],
-                "signal_dbm":  row["signal_dbm"],
-                "channel":     row["channel"],
-                "freq_mhz":    row["freq_mhz"],
-                "device_type": row["device_type"] or "?",
+                "mac":          row["mac"],
+                "signal_dbm":   row["signal_dbm"],
+                "channel":      row["channel"],
+                "freq_mhz":     row["freq_mhz"],
+                "device_type":  row["device_type"] or "?",
                 "manufacturer": row["manufacturer"] or "",
                 "is_randomized": bool(row["is_randomized"]),
-                "ssids":       row["ssids"] or "",
-                "recorded_at": row["recorded_at"] or "",
+                "ssids":        row["ssids"] or "",
+                "recorded_at":  row["recorded_at"] or "",
+                "tracker_type": row["tracker_type"] or "",
             })
 
         # Session summary
@@ -666,6 +668,21 @@ HTML = """<!DOCTYPE html>
     color: var(--yellow);
     margin-left: 4px;
     vertical-align: middle;
+  }
+  tr.tracker-row { background: rgba(246,102,102,0.06); }
+  tr.tracker-row td { border-bottom-color: rgba(246,102,102,0.15); }
+  .tracker-badge {
+    display: inline-block;
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(246,102,102,0.18);
+    color: var(--red);
+    margin-left: 4px;
+    vertical-align: middle;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
   }
   .status-bar {
     display: flex;
@@ -1283,7 +1300,9 @@ function render(data) {
   } else {
     window._wifiRows = wf;  // store for click handler lookup
     let rows = wf.map((row, i) => {
-      const randBadge = row.is_randomized ? '<span class="rand-badge">rand</span>' : '';
+      const isTracker   = !!row.tracker_type;
+      const randBadge   = row.is_randomized ? '<span class="rand-badge">rand</span>' : '';
+      const trackerBadge = isTracker ? '<span class="tracker-badge">' + escHtml(row.tracker_type) + '</span>' : '';
       const ssidList  = row.ssids ? row.ssids.split(',').map(s=>s.trim()).filter(Boolean) : [];
       const ssidPart  = ssidList.length
         ? '<div class="ssid">' + escHtml(ssidList.join(', ')) + '</div>'
@@ -1291,10 +1310,10 @@ function render(data) {
       const mfrPart   = row.manufacturer
         ? '<div class="mfr">' + escHtml(row.manufacturer) + '</div>'
         : '';
-      return '<tr onclick="onRowTap(' + i + ')">' +
+      return '<tr class="' + (isTracker ? 'tracker-row' : '') + '" onclick="onRowTap(' + i + ')">' +
         '<td>' +
           ssidPart +
-          '<div class="mac">' + escHtml(row.mac) + randBadge + '</div>' +
+          '<div class="mac">' + escHtml(row.mac) + randBadge + trackerBadge + '</div>' +
           mfrPart +
         '</td>' +
         '<td class="' + typeClass(row.device_type) + '">' + escHtml(row.device_type) + '</td>' +

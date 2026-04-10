@@ -190,7 +190,9 @@ def init_db(conn):
         ("adv_type",          "TEXT"),
         ("manufacturer_data", "TEXT"),
         ("adv_services",      "TEXT"),
+        ("adv_service_data",  "TEXT"),
         ("tx_power",          "INTEGER"),
+        ("tracker_type",      "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE observations ADD COLUMN {col} {typedef}")
@@ -342,6 +344,83 @@ def _adv_type_str(adv_type):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Tracker classification
+# ---------------------------------------------------------------------------
+
+# Company IDs (little-endian key in bleak's manufacturer_data dict)
+_APPLE_CID   = 0x004C
+_SAMSUNG_CID = 0x0075
+
+# Service UUID -> tracker label (16-bit UUIDs in full 128-bit form)
+_TRACKER_SVCS = {
+    "0000feed-0000-1000-8000-00805f9b34fb": "Tile",
+    "0000fd5a-0000-1000-8000-00805f9b34fb": "Samsung SmartTag",
+    "0000fed8-0000-1000-8000-00805f9b34fb": "Google FMDN",
+    "0000fe2c-0000-1000-8000-00805f9b34fb": "Google FastPair",
+}
+
+# Eddystone (0xFEAA) frame types
+_EDDYSTONE_UUID  = "0000feaa-0000-1000-8000-00805f9b34fb"
+_EDDYSTONE_EID   = 0x40   # Ephemeral Identifier — used by Google FMDN (Moto Tag, etc.)
+_EDDYSTONE_UID   = 0x00
+_EDDYSTONE_URL   = 0x10
+_EDDYSTONE_TLM   = 0x20
+
+def classify_tracker(manufacturer_data, service_uuids, service_data):
+    """
+    Return a short label if the advertisement matches a known tracker type,
+    else None.
+
+    Apple Find My (AirTag, etc.):
+      manufacturer_data[0x004C][0] == 0x12
+
+    Google FMDN (Moto Tag / Moto Tag 2 / Pixel Tag, etc.):
+      Eddystone service UUID 0xFEAA + service data frame type 0x40 (EID).
+      Confirmed from live capture: Moto Tag advertises 0xFEAA/EID, not 0xFED8.
+
+    Tile: service UUID 0xFEED
+    Samsung SmartTag: service UUID 0xFD5A or company 0x0075
+    """
+    # --- Apple ---
+    apple = manufacturer_data.get(_APPLE_CID) if manufacturer_data else None
+    if apple and len(apple) >= 1:
+        t = apple[0]
+        if t == 0x12:
+            return "Apple:FindMy"      # AirTag / Find My accessory
+        if t == 0x02:
+            return "Apple:iBeacon"
+        if t == 0x10:
+            return "Apple:NearbyInfo"  # iPhone / Mac proximity
+        return "Apple"
+
+    # --- Eddystone (0xFEAA) — check frame type in service data ---
+    eddystone_payload = (service_data or {}).get(_EDDYSTONE_UUID)
+    if eddystone_payload and len(eddystone_payload) >= 1:
+        frame = eddystone_payload[0]
+        if frame == _EDDYSTONE_EID:
+            return "Google FMDN"       # Moto Tag, Moto Tag 2, Pixel Tag, etc.
+        if frame == _EDDYSTONE_UID:
+            return "Eddystone-UID"
+        if frame == _EDDYSTONE_URL:
+            return "Eddystone-URL"
+        if frame == _EDDYSTONE_TLM:
+            return "Eddystone-TLM"
+        return "Eddystone"
+
+    # --- Other service UUID based ---
+    for uuid in (service_uuids or []):
+        label = _TRACKER_SVCS.get(uuid.lower())
+        if label:
+            return label
+
+    # --- Samsung manufacturer data fallback ---
+    if manufacturer_data and _SAMSUNG_CID in manufacturer_data:
+        return "Samsung"
+
+    return None
+
+
 def on_advertisement(device, adv_data):
     """Called by bleak for every BLE advertisement received."""
     mac  = device.address.lower()
@@ -351,15 +430,22 @@ def on_advertisement(device, adv_data):
     ts   = datetime.now(timezone.utc).replace(tzinfo=None)
 
     # Manufacturer data: encode as "XXXX:<hex>" per entry
-    mfr_parts = []
-    for company_id, data in (adv_data.manufacturer_data or {}).items():
-        mfr_parts.append(f"{company_id:04X}:{data.hex()}")
-    mfr_str = ",".join(mfr_parts) if mfr_parts else None
+    mfr_dict  = adv_data.manufacturer_data or {}
+    mfr_parts = [f"{cid:04X}:{d.hex()}" for cid, d in mfr_dict.items()]
+    mfr_str   = ",".join(mfr_parts) if mfr_parts else None
 
     # Advertised service UUIDs
-    svc_str = ",".join(str(u) for u in (adv_data.service_uuids or [])) or None
+    svc_uuids = adv_data.service_uuids or []
+    svc_str   = ",".join(str(u) for u in svc_uuids) or None
+
+    # Service data (UUID -> bytes payload) — needed for FMDN / Eddystone
+    svc_data_dict = adv_data.service_data or {}
+    svc_data_parts = [f"{uuid}:{data.hex()}" for uuid, data in svc_data_dict.items()]
+    svc_data_str  = ",".join(svc_data_parts) if svc_data_parts else None
 
     tx_power = adv_data.tx_power   # may be None
+
+    tracker = classify_tracker(mfr_dict, svc_uuids, svc_data_dict)
 
     # Use local name as "SSID" equivalent
     name = adv_data.local_name or ""
@@ -377,22 +463,31 @@ def on_advertisement(device, adv_data):
                 "manufacturer": get_manufacturer(mac),
                 "is_randomized": randomized,
                 "names":        set(),
+                "tracker_type": tracker,
             }
+            if tracker:
+                print(f"[TRACKER] {tracker:20s}  {mac}  rssi={rssi}")
         dev = seen[mac]
         dev["last_seen"] = ts
+        # Update tracker_type if we now have a classification
+        if tracker and not dev.get("tracker_type"):
+            dev["tracker_type"] = tracker
+            print(f"[TRACKER] {tracker:20s}  {mac}  rssi={rssi}")
         if name:
             dev["names"].add(name)
 
         if mac not in live:
             live[mac] = {
-                "signal":           rssi,
+                "signal":            rssi,
                 "manufacturer_data": mfr_str,
-                "adv_services":     svc_str,
-                "tx_power":         tx_power,
-                "names":            set(),
-                "oui":              oui,
-                "is_randomized":    randomized,
-                "manufacturer":     dev["manufacturer"],
+                "adv_services":      svc_str,
+                "adv_service_data":  svc_data_str,
+                "tx_power":          tx_power,
+                "tracker_type":      tracker or dev.get("tracker_type"),
+                "names":             set(),
+                "oui":               oui,
+                "is_randomized":     randomized,
+                "manufacturer":      dev["manufacturer"],
             }
         else:
             if rssi is not None:
@@ -406,8 +501,12 @@ def on_advertisement(device, adv_data):
                 new_svcs = set(existing.split(",")) | set(svc_str.split(","))
                 new_svcs.discard("")
                 live[mac]["adv_services"] = ",".join(sorted(new_svcs)) or None
+            if svc_data_str and not live[mac]["adv_service_data"]:
+                live[mac]["adv_service_data"] = svc_data_str
             if tx_power is not None and live[mac]["tx_power"] is None:
                 live[mac]["tx_power"] = tx_power
+            if tracker and not live[mac].get("tracker_type"):
+                live[mac]["tracker_type"] = tracker
 
         if name:
             live[mac]["names"].add(name)
@@ -460,8 +559,9 @@ def write_snapshot(snap, gps, ts):
                     (session_id, mac, interface, scanner_host,
                      signal_dbm, channel, freq_mhz,
                      gps_lat, gps_lon, gps_fix, recorded_at,
-                     manufacturer_data, adv_services, tx_power)
-                VALUES (?, ?, ?, ?, ?, 37, 2402, ?, ?, ?, ?, ?, ?, ?)
+                     manufacturer_data, adv_services, adv_service_data,
+                     tx_power, tracker_type)
+                VALUES (?, ?, ?, ?, ?, 37, 2402, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 SESSION_ID, mac, SCAN_IFACE, HOSTNAME,
                 s["signal"],
@@ -469,12 +569,16 @@ def write_snapshot(snap, gps, ts):
                 ts_str,
                 s.get("manufacturer_data"),
                 s.get("adv_services"),
+                s.get("adv_service_data"),
                 s.get("tx_power"),
+                s.get("tracker_type"),
             ))
 
         db_conn.commit()
-        total = len(snap)
-        print(f"[SNAP] {ts_str}  {total} BLE devices  "
+        total    = len(snap)
+        trackers = sum(1 for s in snap.values() if s.get("tracker_type"))
+        tracker_summary = f"  [{trackers} trackers]" if trackers else ""
+        print(f"[SNAP] {ts_str}  {total} BLE devices{tracker_summary}  "
               f"GPS {'fix' if gps['fix'] else 'no-fix'} "
               f"({gps['lat']}, {gps['lon']})")
 

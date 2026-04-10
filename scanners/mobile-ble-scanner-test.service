@@ -6,6 +6,7 @@ After=bluetooth.service hciuart.service
 Type=simple
 User=root
 WorkingDirectory=/home/matheau/air_scan
+Environment=PYTHONUNBUFFERED=1
 
 ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/mobile_ble_scanner.py --no-record
 

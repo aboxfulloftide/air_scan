@@ -27,7 +27,7 @@ hotspot_up() {
     local retries=5
     local i=0
     while [ $i -lt $retries ]; do
-        if nmcli con up "$HOTSPOT_CON" 2>/dev/null; then
+        if nmcli con up "$HOTSPOT_CON"; then
             log "Hotspot started"
             return 0
         fi
@@ -45,14 +45,21 @@ hotspot_down() {
 
 # Set initial state on startup
 if eth_is_up; then
-    log "Ethernet UP at startup — scanners and hotspot will not start"
+    log "Ethernet UP at startup — ensuring scanners and hotspot are stopped"
+    systemctl stop "$SCANNER_SERVICE" 2>/dev/null
+    systemctl stop "$BLE_SERVICE" 2>/dev/null
+    hotspot_down
     prev="up"
 else
     log "Ethernet DOWN at startup — starting scanners and hotspot"
-    systemctl start "$SCANNER_SERVICE"
-    systemctl start "$BLE_SERVICE"
-    hotspot_up
-    prev="down"
+    systemctl start --no-block "$SCANNER_SERVICE"
+    systemctl start --no-block "$BLE_SERVICE"
+    if hotspot_up; then
+        prev="down"
+    else
+        log "Initial hotspot start failed — will retry in poll loop"
+        prev="up"   # trick the loop into seeing a down transition next tick
+    fi
 fi
 
 # Watch for changes
@@ -77,9 +84,15 @@ while true; do
             systemctl start mobile-sync.service
         else
             log "Ethernet disconnected — starting scanners and hotspot"
-            systemctl start "$SCANNER_SERVICE"
-            systemctl start "$BLE_SERVICE"
-            hotspot_up
+            systemctl start --no-block "$SCANNER_SERVICE"
+            systemctl start --no-block "$BLE_SERVICE"
+            if hotspot_up; then
+                prev="$current"
+            else
+                log "Hotspot start failed — will retry next tick"
+                # leave prev="up" so the loop retries on the next iteration
+            fi
+            continue
         fi
         prev="$current"
     fi
