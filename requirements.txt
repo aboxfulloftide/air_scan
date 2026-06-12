@@ -5,6 +5,9 @@ mysql-connector-python>=8.0
 # Mobile scanner
 pyserial>=3.5          # GPS serial fallback (gpsd preferred)
 
+# BLE scanning (stationary + mobile scanners)
+bleak>=0.21.0
+
 # Web API
 fastapi>=0.128.0
 uvicorn>=0.30.0
