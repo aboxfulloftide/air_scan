@@ -7,7 +7,8 @@
  * buffered observations to the API.
  *
  * Required libraries (install via Arduino Library Manager):
- *   - ArduinoJson  (Benoit Blanchon, v6.x)
+ *   - ArduinoJson    (Benoit Blanchon, v6.x)
+ *   - NimBLE-Arduino (h2zero, v1.4.x) — only when BLE_ENABLED (config.h)
  *
  * ── Flash settings (arduino-cli) ─────────────────────────────────────────────
  * Board FQBN:  esp32:esp32:esp32c5:CDCOnBoot=cdc
@@ -30,6 +31,15 @@
  * on 2.4 GHz too. See wifi_disconnect_and_resume().
  *
  * ── Changelog ────────────────────────────────────────────────────────────────
+ * v1.3.0 — 2026-06-22
+ *   Add BLE advertisement scanning via NimBLE (config: BLE_ENABLED). BLE runs
+ *   in active scan mode concurrently with WiFi promisc and is buffered per-MAC
+ *   over the same 10s slot (best RSSI kept), then flushed alongside WiFi rows
+ *   as device_type="BLE". Raw manufacturer/service-data hex is sent verbatim;
+ *   the server classifies tracker_type. JSON flush buffer raised 40KB→64KB to
+ *   hold the combined WiFi+BLE payload — verify ESP.getFreeHeap() on target.
+ *   NOTE: not yet validated on hardware; see docs/ble_esp32_integration.md.
+ *
  * v1.1.2 — 2026-03-22
  *   Fix: serialize JSON into a static char buffer and call doc.clear() before
  *   opening the HTTP connection. Previously DynamicJsonDocument (40KB) and
@@ -58,6 +68,10 @@
 #include <esp_wifi.h>
 #include <time.h>
 #include "config.h"
+
+#if BLE_ENABLED
+#include <NimBLEDevice.h>
+#endif
 
 // ── Observation structs ───────────────────────────────────────────────────────
 
@@ -98,6 +112,167 @@ static time_t    last_flush_ts   = 0;
 static time_t    last_slot_ts    = 0;
 static bool      time_synced     = false;
 static uint32_t  flush_count     = 0;
+
+// ── BLE scanning ───────────────────────────────────────────────────────────────
+#if BLE_ENABLED
+
+// Live window (one entry per distinct BLE address seen this slot) and the
+// snapshot buffer flushed to the API. Mirrors the WiFi live→obs model so BLE
+// observations land on the same 10s slot boundaries as everything else.
+struct BleLive {
+    char    mac[18];          // "aa:bb:cc:dd:ee:ff"
+    int8_t  signal;
+    int8_t  tx_power;         // INT8_MIN if not advertised
+    bool    random_addr;
+    bool    active;
+    char    mfr_data[160];    // "XXXX:<hex>[,...]" (truncated)
+    char    adv_services[160];// comma-separated 128-bit UUIDs
+    char    svc_data[160];    // "uuid:<hex>[,...]"
+};
+
+struct BleObs {
+    char    mac[18];
+    int8_t  signal;
+    int8_t  tx_power;
+    bool    random_addr;
+    time_t  recorded_at;
+    char    mfr_data[160];
+    char    adv_services[160];
+    char    svc_data[160];
+};
+
+static BleLive      ble_live[BLE_BUF_SIZE];
+static BleObs       ble_obs[BLE_BUF_SIZE];
+static int          ble_live_count = 0;
+static int          ble_obs_count  = 0;
+static portMUX_TYPE ble_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// Hex-encode bytes into a NUL-terminated lowercase string.
+static void bytes_to_hex(const uint8_t *data, size_t len, char *out, size_t out_sz) {
+    size_t j = 0;
+    for (size_t i = 0; i < len && j + 3 <= out_sz; i++) {
+        snprintf(out + j, out_sz - j, "%02x", data[i]);
+        j += 2;
+    }
+    out[j] = '\0';
+}
+
+static int ble_find_live(const char *mac) {
+    for (int i = 0; i < ble_live_count; i++) {
+        if (ble_live[i].active && strncmp(ble_live[i].mac, mac, 18) == 0)
+            return i;
+    }
+    return -1;
+}
+
+// NimBLE host-task callback: one call per received advertisement. We format the
+// advertisement fields into local buffers first (snprintf is too slow to hold a
+// spinlock across), then take the lock only to insert/update the live entry.
+class BleCb : public NimBLEAdvertisedDeviceCallbacks {
+    void onResult(NimBLEAdvertisedDevice *dev) override {
+        char mac[18];
+        strncpy(mac, dev->getAddress().toString().c_str(), sizeof(mac));
+        mac[17] = '\0';
+
+        int8_t rssi    = (int8_t)dev->getRSSI();
+        int8_t txp     = dev->haveTXPower() ? (int8_t)dev->getTXPower() : INT8_MIN;
+        bool   is_rand = (dev->getAddress().getType() != BLE_ADDR_PUBLIC);
+
+        // Manufacturer data: "XXXX:<hex>" — first 2 bytes are the SIG company
+        // ID (little-endian), the rest is the payload.
+        char mfr[160] = {};
+        if (dev->haveManufacturerData()) {
+            std::string md = dev->getManufacturerData();
+            if (md.size() >= 2) {
+                uint16_t cid = (uint8_t)md[0] | ((uint8_t)md[1] << 8);
+                char hex[150];
+                bytes_to_hex((const uint8_t *)md.data() + 2, md.size() - 2,
+                             hex, sizeof(hex));
+                snprintf(mfr, sizeof(mfr), "%04X:%s", cid, hex);
+            }
+        }
+
+        // Advertised service UUIDs (full 128-bit form, comma-separated).
+        char svcs[160] = {};
+        for (int i = 0; i < dev->getServiceUUIDCount(); i++) {
+            std::string u = dev->getServiceUUID(i).to128().toString();
+            size_t cur = strlen(svcs);
+            snprintf(svcs + cur, sizeof(svcs) - cur, "%s%s",
+                     cur ? "," : "", u.c_str());
+        }
+
+        // Service data: "uuid:<hex>" entries, comma-separated.
+        char svcd[160] = {};
+        for (int i = 0; i < dev->getServiceDataCount(); i++) {
+            std::string u = dev->getServiceDataUUID(i).to128().toString();
+            std::string d = dev->getServiceData(i);
+            char hex[120];
+            bytes_to_hex((const uint8_t *)d.data(), d.size(), hex, sizeof(hex));
+            size_t cur = strlen(svcd);
+            snprintf(svcd + cur, sizeof(svcd) - cur, "%s%s:%s",
+                     cur ? "," : "", u.c_str(), hex);
+        }
+
+        portENTER_CRITICAL(&ble_mux);
+        int idx = ble_find_live(mac);
+        if (idx < 0) {
+            if (ble_live_count >= BLE_BUF_SIZE) { portEXIT_CRITICAL(&ble_mux); return; }
+            idx = ble_live_count++;
+            ble_live[idx].active = true;
+            strncpy(ble_live[idx].mac, mac, 18);
+            ble_live[idx].signal      = rssi;
+            ble_live[idx].tx_power    = txp;
+            ble_live[idx].random_addr = is_rand;
+            strncpy(ble_live[idx].mfr_data,     mfr,  sizeof(ble_live[idx].mfr_data));
+            strncpy(ble_live[idx].adv_services, svcs, sizeof(ble_live[idx].adv_services));
+            strncpy(ble_live[idx].svc_data,     svcd, sizeof(ble_live[idx].svc_data));
+        } else {
+            // Keep the strongest RSSI in the window; backfill any field that a
+            // later (e.g. scan-response) advertisement fills in.
+            if (rssi > ble_live[idx].signal) ble_live[idx].signal = rssi;
+            if (txp != INT8_MIN) ble_live[idx].tx_power = txp;
+            if (mfr[0]  && !ble_live[idx].mfr_data[0])
+                strncpy(ble_live[idx].mfr_data, mfr, sizeof(ble_live[idx].mfr_data));
+            if (svcs[0] && !ble_live[idx].adv_services[0])
+                strncpy(ble_live[idx].adv_services, svcs, sizeof(ble_live[idx].adv_services));
+            if (svcd[0] && !ble_live[idx].svc_data[0])
+                strncpy(ble_live[idx].svc_data, svcd, sizeof(ble_live[idx].svc_data));
+        }
+        portEXIT_CRITICAL(&ble_mux);
+    }
+};
+
+static void setup_ble() {
+    NimBLEDevice::init("");
+    NimBLEScan *s = NimBLEDevice::getScan();
+    s->setAdvertisedDeviceCallbacks(new BleCb(), /*wantDuplicates=*/true);
+    s->setActiveScan(true);              // request scan responses (tx_power, name)
+    s->setInterval(BLE_SCAN_INT);
+    s->setWindow(BLE_SCAN_WIN);
+    s->start(0, nullptr, false);         // duration 0 → scan forever
+    Serial.println("[BLE] Scanning started");
+}
+
+// Commit the BLE live window into the snapshot buffer at a slot boundary.
+static void take_ble_snapshot(time_t slot_ts) {
+    portENTER_CRITICAL(&ble_mux);
+    for (int i = 0; i < ble_live_count; i++) {
+        if (!ble_live[i].active) continue;
+        if (ble_obs_count >= BLE_BUF_SIZE) break;
+        BleObs &o = ble_obs[ble_obs_count++];
+        strncpy(o.mac, ble_live[i].mac, 18);
+        o.signal      = ble_live[i].signal;
+        o.tx_power    = ble_live[i].tx_power;
+        o.random_addr = ble_live[i].random_addr;
+        o.recorded_at = slot_ts;
+        strncpy(o.mfr_data,     ble_live[i].mfr_data,     sizeof(o.mfr_data));
+        strncpy(o.adv_services, ble_live[i].adv_services, sizeof(o.adv_services));
+        strncpy(o.svc_data,     ble_live[i].svc_data,     sizeof(o.svc_data));
+    }
+    ble_live_count = 0;
+    portEXIT_CRITICAL(&ble_mux);
+}
+#endif  // BLE_ENABLED
 
 // ── 802.11 frame parsing ──────────────────────────────────────────────────────
 
@@ -408,9 +583,14 @@ static void check_ota() {
 // ── HTTP flush ────────────────────────────────────────────────────────────────
 
 static void flush_to_api() {
-    if (obs_count == 0) return;
+    int ble_count = 0;
+#if BLE_ENABLED
+    ble_count = ble_obs_count;
+#endif
+    if (obs_count == 0 && ble_count == 0) return;
 
-    Serial.printf("[FLUSH] %d observations — connecting WiFi\n", obs_count);
+    Serial.printf("[FLUSH] %d wifi + %d ble observations — connecting WiFi\n",
+                  obs_count, ble_count);
 
     unsigned long t0 = millis();
 
@@ -433,8 +613,11 @@ static void flush_to_api() {
     String h_mac             = WiFi.macAddress();
 
     // Build JSON payload
-    // Each observation: ~120 bytes JSON; 300 obs = ~36 KB
-    DynamicJsonDocument doc(40960);
+    // WiFi obs ~120 bytes each; BLE obs ~250 bytes each (raw adv hex). Buffer is
+    // 64 KB to hold the combined WiFi+BLE batch. Freed (doc.clear) before the
+    // HTTP connect so peak heap is transient — watch ESP.getFreeHeap() on target
+    // and trim MAX_OBS / BLE_BUF_SIZE if the C5 runs short.
+    DynamicJsonDocument doc(65536);
     doc["scanner_host"] = SCANNER_NAME;
 
     JsonObject health = doc.createNestedObject("health");
@@ -477,13 +660,42 @@ static void flush_to_api() {
         obj["recorded_at"] = ts_str;
     }
 
+#if BLE_ENABLED
+    // Append BLE rows after the WiFi rows. channel / freq / ssid are omitted
+    // (NULL server-side); the server classifies tracker_type from the raw hex.
+    int ble_n;
+    portENTER_CRITICAL(&ble_mux);
+    ble_n = ble_obs_count;
+    portEXIT_CRITICAL(&ble_mux);
+
+    for (int i = 0; i < ble_n; i++) {
+        BleObs &o = ble_obs[i];
+        JsonObject obj = arr.createNestedObject();
+
+        struct tm *t = gmtime(&o.recorded_at);
+        char ts_str[20];
+        strftime(ts_str, sizeof(ts_str), "%Y-%m-%dT%H:%M:%S", t);
+
+        obj["mac"]           = o.mac;
+        obj["device_type"]   = "BLE";
+        obj["signal_dbm"]    = o.signal;
+        obj["is_randomized"] = o.random_addr;
+        obj["interface"]     = BLE_IFACE;
+        obj["recorded_at"]   = ts_str;
+        if (o.tx_power != INT8_MIN)  obj["tx_power"]          = o.tx_power;
+        if (o.mfr_data[0])           obj["manufacturer_data"] = o.mfr_data;
+        if (o.adv_services[0])       obj["adv_services"]      = o.adv_services;
+        if (o.svc_data[0])           obj["adv_service_data"]  = o.svc_data;
+    }
+#endif
+
     // Serialize into a static buffer (BSS, not heap) then free the doc before
     // opening the HTTP connection. This halves peak heap usage (~40KB → ~40KB
     // instead of doc + String simultaneously) and prevents fragmentation-induced
     // crash after several hours of operation.
-    static char json_buf[40960];
+    static char json_buf[65536];
     size_t json_len = serializeJson(doc, json_buf, sizeof(json_buf));
-    doc.clear();  // free 40KB heap before HTTP connect
+    doc.clear();  // free heap before HTTP connect
 
     unsigned long t_json = millis();
 
@@ -505,6 +717,11 @@ static void flush_to_api() {
         portENTER_CRITICAL(&buf_mux);
         obs_count = 0;
         portEXIT_CRITICAL(&buf_mux);
+#if BLE_ENABLED
+        portENTER_CRITICAL(&ble_mux);
+        ble_obs_count = 0;
+        portEXIT_CRITICAL(&ble_mux);
+#endif
 
         // OTA check every 10 flushes (~10 min)
         if (flush_count % 10 == 0) check_ota();
@@ -547,6 +764,15 @@ void setup() {
     esp_wifi_set_channel(current_channel, WIFI_SECOND_CHAN_NONE);
 
     Serial.printf("[SCAN] Started on channel %d\n", current_channel);
+
+#if BLE_ENABLED
+    // Start BLE last — it shares the radio controller with WiFi promisc and the
+    // NimBLE stack interleaves scan windows automatically.
+    memset(ble_live, 0, sizeof(ble_live));
+    memset(ble_obs,  0, sizeof(ble_obs));
+    setup_ble();
+    Serial.printf("[HEAP] free=%u after BLE init\n", ESP.getFreeHeap());
+#endif
 }
 
 // ── Loop ──────────────────────────────────────────────────────────────────────
@@ -558,17 +784,30 @@ void loop() {
     time_t slot_ts = (now / SLOT_SECONDS) * SLOT_SECONDS;
     if (slot_ts != last_slot_ts && now > 1000000000L) {
         take_snapshot(slot_ts);
+#if BLE_ENABLED
+        take_ble_snapshot(slot_ts);
+#endif
         last_slot_ts = slot_ts;
 
         // Hop channel at each slot boundary (integer math avoids float precision loss)
         hop_channel(slot_ts);
 
+#if BLE_ENABLED
+        Serial.printf("[%lld] ch%-3d | wifi live:%-3d buf:%-3d | ble live:%-3d buf:%-3d\n",
+                      (long long)slot_ts, current_channel,
+                      live_count, obs_count, ble_live_count, ble_obs_count);
+#else
         Serial.printf("[%lld] ch%-3d | live:%-3d buf:%-3d\n",
                       (long long)slot_ts, current_channel, live_count, obs_count);
+#endif
     }
 
     // Flush to API every FLUSH_SECONDS
-    if (now - last_flush_ts >= FLUSH_SECONDS && obs_count > 0) {
+    bool have_data = obs_count > 0;
+#if BLE_ENABLED
+    have_data = have_data || ble_obs_count > 0;
+#endif
+    if (now - last_flush_ts >= FLUSH_SECONDS && have_data) {
         last_flush_ts = now;
         flush_to_api();
         return;

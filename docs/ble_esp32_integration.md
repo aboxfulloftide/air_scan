@@ -4,14 +4,22 @@ How to add Bluetooth Low Energy scanning to the existing ESP32 firmware so its
 observations flow through the same API + DB pipeline that the stationary Pi
 scanners and the mobile scanner already use.
 
-## Current state (as of this doc)
+## Status
+
+**Implemented (firmware v1.3.0, 2026-06-22)** — server + ESP32 firmware now
+handle BLE end to end. The firmware change has **not yet been validated on
+hardware**; the testing checklist at the bottom is still open. The rest of this
+doc is kept as the design reference for what was built.
+
+## Current state
 
 - **Pi scanners** (`scanners/wifi_scanner.py`) — WiFi + BLE via `bleak` on `hci0`.
   Writes directly to MySQL.
 - **Mobile scanner** (`scanners/mobile_scanner.py` + `mobile_ble_scanner.py`) —
   WiFi + BLE, writes to `mobile_observations`, later synced.
-- **ESP32 firmware** (`scanners/esp32/esp32_scanner.ino`) — WiFi only. Posts
-  batched JSON to `POST /api/observations/upload`. **No BLE today.**
+- **ESP32 firmware** (`scanners/esp32/esp32_scanner.ino`) — WiFi + BLE (NimBLE).
+  Posts batched JSON (both WiFi and BLE rows) to `POST /api/observations/upload`.
+  BLE gated by `BLE_ENABLED` in `config.h`.
 
 The DB schema already supports BLE everywhere it needs to:
 

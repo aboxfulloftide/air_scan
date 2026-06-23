@@ -20,6 +20,7 @@
 #define SCANNER_NAME    "bedroom32"
 #define DEVICE_HOSTNAME "bedroom32"
 #define SCAN_IFACE      "esp32-wifi"
+#define BLE_IFACE       "esp32-ble"
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 #define SLOT_SECONDS    10      // snapshot window (must match other scanners)
@@ -30,8 +31,18 @@
 // Each entry is ~80 bytes; 500 entries = ~40 KB (fits standard ESP32 320KB DRAM)
 #define MAX_OBS         500
 
+// ── BLE scanning ──────────────────────────────────────────────────────────────
+// Requires the NimBLE-Arduino library (smaller than the bundled Bluedroid stack).
+// Set BLE_ENABLED 0 to build WiFi-only. BLE rows are accumulated per MAC over the
+// 10s slot (best RSSI kept) and flushed alongside WiFi rows. Keep BLE_BUF_SIZE
+// modest — BLE rows share the 40 KB JSON flush buffer with WiFi observations.
+#define BLE_ENABLED     1
+#define BLE_BUF_SIZE    200     // max distinct BLE devices tracked per slot
+#define BLE_SCAN_INT    160     // scan interval in 0.625ms units (160 = 100ms)
+#define BLE_SCAN_WIN    80      // scan window in 0.625ms units (80 = 50ms, 50% duty)
+
 // ── Firmware version ──────────────────────────────────────────────────────────
-#define FIRMWARE_VERSION "1.2.0"
+#define FIRMWARE_VERSION "1.3.0"
 
 // ── Channels ─────────────────────────────────────────────────────────────────
 // Standard ESP32: 2.4 GHz only

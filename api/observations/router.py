@@ -18,6 +18,32 @@ except ImportError:
     def _oui_lookup(mac):
         return None
 
+# Shared BLE tracker classifier (same rules the Pi / mobile scanners use).
+# Imported as a namespace module from the repo root (the API runs with the
+# project dir as CWD). Degrade gracefully if it can't be loaded.
+try:
+    from scanners.ble_classify import classify_tracker
+except Exception:  # pragma: no cover - defensive
+    def classify_tracker(manufacturer_data, service_uuids, service_data):
+        return None
+
+# Bluetooth SIG company identifiers → manufacturer name. The scapy OUI table is
+# WiFi-MAC-only and useless for BLE random addresses, so for BLE rows we resolve
+# the manufacturer from the company ID in the advertisement instead. Partial
+# list covering the vendors we care about; unknown CIDs leave manufacturer NULL.
+_BT_SIG_CID = {
+    0x004C: "Apple",
+    0x0075: "Samsung",
+    0x00E0: "Google",
+    0x0006: "Microsoft",
+    0x0087: "Garmin",
+    0x009E: "Bose",
+    0x00B7: "Fitbit",
+    0x0118: "Tile",
+    0x038F: "Xiaomi",
+    0x0157: "Huami",
+}
+
 router = APIRouter(prefix="/api/observations", tags=["observations"])
 logger = logging.getLogger(__name__)
 
@@ -29,6 +55,47 @@ DEVICE_BATCH_SIZE = 50
 def _chunks(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
+
+
+def _parse_ble_fields(obs):
+    """
+    Parse the raw BLE advertisement strings a scanner sends into the shapes
+    classify_tracker() expects. The on-wire string formats match what
+    wifi_scanner.py and mobile_ble_scanner.py produce.
+
+    Returns (manufacturer_data, service_uuids, service_data):
+      manufacturer_data: {company_id_int: bytes}  from "XXXX:<hex>,..."
+      service_uuids:     [lowercase uuid str]      from "uuid,uuid,..."
+      service_data:      {uuid_str: bytes}         from "uuid:<hex>,..."
+    """
+    mfr = {}
+    for entry in (obs.get("manufacturer_data") or "").split(","):
+        if ":" in entry:
+            cid_hex, payload = entry.split(":", 1)
+            try:
+                mfr[int(cid_hex, 16)] = bytes.fromhex(payload)
+            except ValueError:
+                pass
+    svcs = [u.strip().lower() for u in
+            (obs.get("adv_services") or "").split(",") if u.strip()]
+    svc_data = {}
+    for entry in (obs.get("adv_service_data") or "").split(","):
+        if ":" in entry:
+            uuid, payload = entry.split(":", 1)
+            try:
+                svc_data[uuid.strip().lower()] = bytes.fromhex(payload)
+            except ValueError:
+                pass
+    return mfr, svcs, svc_data
+
+
+def _ble_manufacturer(mfr):
+    """Resolve a manufacturer name from parsed BLE manufacturer data, or None."""
+    for cid in mfr:
+        name = _BT_SIG_CID.get(cid)
+        if name:
+            return name
+    return None
 
 
 def _build_device_values(batch, device_rows):
@@ -43,7 +110,7 @@ def _build_device_values(batch, device_rows):
         )
         params.update({
             f"mac_{i}": mac, f"type_{i}": d["type"], f"oui_{i}": d["oui"],
-            f"mfr_{i}": _oui_lookup(mac),
+            f"mfr_{i}": d["manufacturer"],
             f"rand_{i}": d["is_randomized"],
             f"ht_{i}": d["ht"], f"vht_{i}": d["vht"], f"he_{i}": d["he"],
             f"first_{i}": d["first_seen"], f"last_{i}": d["last_seen"],
@@ -78,13 +145,19 @@ def _build_ssid_values(ssid_rows):
 
 
 def _build_obs_values(batch, scanner_host):
-    """Build multi-row INSERT for observations."""
+    """Build multi-row INSERT for observations.
+
+    BLE rows carry the extra advertisement columns (manufacturer_data,
+    adv_services, adv_service_data, tx_power, tracker_type); WiFi rows leave
+    them NULL. Conversely channel / freq_mhz are NULL for BLE.
+    """
     parts = []
     params = {}
     for i, obs in enumerate(batch):
         parts.append(
             f"(:mac_{i}, :iface_{i}, :host_{i}, :sig_{i},"
-            f" :ch_{i}, :freq_{i}, :pc_{i}, :ts_{i})"
+            f" :ch_{i}, :freq_{i}, :pc_{i},"
+            f" :md_{i}, :as_{i}, :asd_{i}, :tx_{i}, :tt_{i}, :ts_{i})"
         )
         params.update({
             f"mac_{i}":  obs["mac"],
@@ -94,12 +167,19 @@ def _build_obs_values(batch, scanner_host):
             f"ch_{i}":    obs.get("channel"),
             f"freq_{i}":  obs.get("freq_mhz"),
             f"pc_{i}":    obs.get("probe_count", 1),
+            f"md_{i}":    obs.get("manufacturer_data"),
+            f"as_{i}":    obs.get("adv_services"),
+            f"asd_{i}":   obs.get("adv_service_data"),
+            f"tx_{i}":    obs.get("tx_power"),
+            f"tt_{i}":    obs.get("tracker_type"),
             f"ts_{i}":    obs.get("recorded_at"),
         })
     sql = text(
         "INSERT INTO observations"
         "  (mac, interface, scanner_host, signal_dbm,"
-        "   channel, freq_mhz, probe_count, recorded_at) "
+        "   channel, freq_mhz, probe_count,"
+        "   manufacturer_data, adv_services, adv_service_data,"
+        "   tx_power, tracker_type, recorded_at) "
         "VALUES " + ", ".join(parts)
     )
     return sql, params
@@ -131,6 +211,23 @@ async def upload_observations(body: dict, db: AsyncSession = Depends(get_db)):
             ...
         ]
     }
+
+    BLE rows set "device_type": "BLE" and carry the raw advertisement fields
+    instead of channel/ssid:
+    {
+        "mac":               "aa:bb:cc:dd:ee:ff",
+        "device_type":       "BLE",
+        "signal_dbm":        -72,
+        "is_randomized":     true,            // optional; else derived from address
+        "tx_power":          -8,              // optional
+        "manufacturer_data": "004C:1219...",  // "XXXX:<hex>[,...]"
+        "adv_services":      "0000feaa-0000-1000-8000-00805f9b34fb",
+        "adv_service_data":  "0000feaa-...:40ab12...",
+        "interface":         "esp32-ble",
+        "recorded_at":       "2026-03-17T01:00:00"
+    }
+    The server classifies tracker_type from these raw fields — clients do not
+    send it on this path.
     """
     scanner_host = body.get("scanner_host", "unknown")
     observations = body.get("observations", [])
@@ -170,12 +267,27 @@ async def upload_observations(body: dict, db: AsyncSession = Depends(get_db)):
             continue
 
         ts = obs.get("recorded_at")
+        dtype = obs.get("device_type", "Client")
+        is_ble = (dtype == "BLE")
 
         if mac not in device_rows:
+            first_byte = int(mac.split(":")[0], 16)
+            if is_ble:
+                # BLE: randomized = bit 6 of the first address byte, but trust
+                # an explicit client flag if it sent one. Manufacturer comes
+                # from the SIG company ID, not the (meaningless) OUI.
+                rand = obs.get("is_randomized")
+                rand = int(bool(rand)) if rand is not None else int(bool(first_byte & 0x40))
+                manuf = _ble_manufacturer(_parse_ble_fields(obs)[0])
+            else:
+                # WiFi: randomized = locally-administered bit; OUI table lookup.
+                rand = int(bool(first_byte & 0x02))
+                manuf = _oui_lookup(mac)
             device_rows[mac] = {
-                "type":          obs.get("device_type", "Client"),
+                "type":          dtype,
                 "oui":           mac[:8].upper(),
-                "is_randomized": int(bool(int(mac.split(":")[0], 16) & 0x02)),
+                "manufacturer":  manuf,
+                "is_randomized": rand,
                 "ht":  0, "vht": 0, "he": 0,
                 "ssids": set(),
                 "first_seen": ts,
@@ -191,6 +303,10 @@ async def upload_observations(body: dict, db: AsyncSession = Depends(get_db)):
         ssid = obs.get("ssid", "")
         if ssid:
             d["ssids"].add(ssid)
+        # A later advertisement for the same device may be the first to carry
+        # manufacturer data — backfill if we don't have a name yet.
+        if is_ble and not d["manufacturer"]:
+            d["manufacturer"] = _ble_manufacturer(_parse_ble_fields(obs)[0])
 
     # ── Write to DB with deadlock retry ────────────────────────────────────────
     for attempt in range(1, DEADLOCK_MAX_RETRIES + 1):
@@ -223,8 +339,14 @@ async def upload_observations(body: dict, db: AsyncSession = Depends(get_db)):
             valid_obs = []
             for obs in observations:
                 mac = obs.get("mac", "").lower()
-                if mac in device_rows:
-                    valid_obs.append({**obs, "mac": mac})
+                if mac not in device_rows:
+                    continue
+                row = {**obs, "mac": mac}
+                # Classify BLE trackers server-side (single source of truth).
+                if device_rows[mac]["type"] == "BLE":
+                    mfr, svcs, svc_data = _parse_ble_fields(obs)
+                    row["tracker_type"] = classify_tracker(mfr, svcs, svc_data)
+                valid_obs.append(row)
             for batch in _chunks(valid_obs, DEVICE_BATCH_SIZE):
                 sql, params = _build_obs_values(batch, scanner_host)
                 await db.execute(sql, params)

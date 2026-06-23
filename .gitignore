@@ -32,3 +32,4 @@ dist/
 .next/
 # Note: scanners/static/ (Leaflet assets) IS committed — only root static/ is excluded
 /static/
+logs/
