@@ -32,3 +32,6 @@ dist/
 .next/
 # Note: scanners/static/ (Leaflet assets) IS committed — only root static/ is excluded
 /static/
+
+# Automation kill switch flag (local state, see scanners/air_scan_ctl.sh)
+.air_scan_disabled

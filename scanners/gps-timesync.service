@@ -1,0 +1,22 @@
+[Unit]
+Description=GPS boot-time clock sync (NTP fallback)
+Documentation=man:gpsd
+After=gpsd.service
+Wants=gpsd.service
+Before=mobile-scanner.service mobile-scanner-test.service
+
+[Service]
+Type=oneshot
+User=root
+
+# Master kill switch — blocks start while the air_scan disable flag is set
+ExecCondition=/home/matheau/air_scan/scanners/air_scan_ctl.sh check
+
+ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/gps_timesync_boot.py
+TimeoutStartSec=1830
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

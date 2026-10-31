@@ -11,6 +11,11 @@ Usage:
     python3 mobile_sync.py                    # auto-detect DB on USB drive
     python3 mobile_sync.py --db /path/to/mobile_scan.db
     python3 mobile_sync.py --dry-run          # show what would be synced
+    python3 mobile_sync.py --force            # ignore the air_scan disable flag
+
+Does nothing while the air_scan disable flag is set (see air_scan_ctl.sh),
+so an ethernet event cannot upload anything while the Pi is in use for
+something else.
 """
 
 import sys
@@ -44,6 +49,7 @@ import mysql.connector
 parser = argparse.ArgumentParser(description="Sync mobile scan SQLite to central MySQL")
 parser.add_argument("--db",      default=None, help="Path to mobile_scan.db (auto-detect if omitted)")
 parser.add_argument("--dry-run", action="store_true", help="Show what would be synced without writing")
+parser.add_argument("--force",   action="store_true", help="Run even if the air_scan disable flag is set")
 args = parser.parse_args()
 
 MYSQL_CFG = {
@@ -53,6 +59,26 @@ MYSQL_CFG = {
     "database":     os.environ.get("DB_NAME", "wireless"),
     "ssl_disabled": os.environ.get("DB_SSL", "disabled").lower() == "disabled",
 }
+
+# ---------------------------------------------------------------------------
+# Kill switch — see scanners/air_scan_ctl.sh
+# ---------------------------------------------------------------------------
+
+DISABLE_FLAGS = (
+    Path(__file__).resolve().parent.parent / ".air_scan_disabled",
+    Path("/etc/air_scan/disabled"),
+)
+
+
+def disabled_by():
+    """Return the source of the disable flag, or None if automation is allowed."""
+    if os.environ.get("AIR_SCAN_DISABLED") == "1":
+        return "AIR_SCAN_DISABLED=1"
+    for flag in DISABLE_FLAGS:
+        if flag.exists():
+            return str(flag)
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Find SQLite DB
@@ -250,6 +276,16 @@ def sync(sqlite_path, dry_run=False):
     obs_synced  = []
     total_written = 0
 
+    insert_sql = """
+        INSERT INTO mobile_observations
+            (mac, interface, scanner_host, signal_dbm, channel,
+             freq_mhz, channel_flags, gps_lat, gps_lon, gps_fix,
+             session_id, recorded_at,
+             manufacturer_data, adv_services, tx_power,
+             adv_service_data, tracker_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
     obs_batch = []
     for row in rows:
         obs_batch.append((
@@ -263,29 +299,14 @@ def sync(sqlite_path, dry_run=False):
         obs_synced.append(row["obs_id"])
 
         if len(obs_batch) >= BATCH_SIZE:
-            cur.executemany("""
-                INSERT INTO mobile_observations
-                    (mac, interface, scanner_host, signal_dbm, channel,
-                     freq_mhz, channel_flags, gps_lat, gps_lon, gps_fix,
-                     session_id, recorded_at,
-                     manufacturer_data, adv_services, tx_power,
-                     adv_service_data, tracker_type)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, obs_batch)
+            cur.executemany(insert_sql, obs_batch)
             dst.commit()
             total_written += len(obs_batch)
             print(f"  ...{total_written} / {unsynced_count}", end="\r", flush=True)
             obs_batch.clear()
 
     if obs_batch:
-        cur.executemany("""
-            INSERT INTO mobile_observations
-                (mac, interface, scanner_host, signal_dbm, channel,
-                 freq_mhz, channel_flags, gps_lat, gps_lon, gps_fix,
-                 session_id, recorded_at,
-                 manufacturer_data, adv_services, tx_power)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, obs_batch)
+        cur.executemany(insert_sql, obs_batch)
         dst.commit()
         total_written += len(obs_batch)
 
@@ -320,6 +341,11 @@ def sync(sqlite_path, dry_run=False):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    flag = disabled_by()
+    if flag and not args.force:
+        print(f"Sync disabled by flag ({flag}) — nothing uploaded. Use --force to override.")
+        sys.exit(0)
+
     if args.db:
         db_path = Path(args.db)
     else:

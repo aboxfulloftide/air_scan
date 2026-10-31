@@ -175,6 +175,43 @@ sudo journalctl -fu wifi-scanner.service   # follow live logs
 
 ---
 
+## Kill Switch — Disabling All Automation
+
+On the mobile Pi, one flag turns off *every* automatic behavior — WiFi/BLE
+scanning, the hotspot, the status page, GPS clock sync, and the wired sync
+upload to MySQL. Use it when the Pi is needed for something unrelated.
+
+```bash
+sudo air-scan disable            # turn everything automatic off
+sudo air-scan disable "reason"   # optional note, recorded in the flag file
+sudo air-scan enable             # turn it all back on
+sudo air-scan toggle             # flip whichever way it is now
+     air-scan status             # show flag state + every unit
+```
+
+`air-scan` is `scanners/air_scan_ctl.sh`, symlinked into `/usr/local/bin`.
+
+**How it is enforced.** The flag is the file `/etc/air_scan/disabled`, so the
+setting survives reboots and needs no running daemon. Every automatic entry
+point consults `air-scan check` (exit 0 = allowed, 2 = disabled):
+
+| Entry point | Gate |
+|-------------|------|
+| `mobile-scanner`, `mobile-ble-scanner`, `mobile-status`, `gps-timesync` | `ExecCondition=` — unit is skipped, at boot or on manual start |
+| `mobile-sync.service` (ethernet udev rule, net watcher) | `ExecCondition=` plus a check inside `mobile_sync.py` |
+| `mobile_net_watcher.sh` | Checks every poll; idles instead of starting scanners, hotspot or sync |
+
+Notes:
+
+- `disable` also stops anything already running; the net watcher keeps running
+  but idles, so `enable` resumes it within a couple of seconds.
+- An active hotspot connection is left up (dropping it could cut your own
+  access) — `nmcli con down Hotspot` if you want it gone.
+- `mobile_sync.py --force` and the manual `*-test.service` units still work on
+  purpose, so you can run something deliberately while automation is off.
+
+---
+
 ## Useful Queries
 
 **Most recently seen devices with manufacturer:**

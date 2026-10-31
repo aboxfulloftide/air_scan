@@ -6,6 +6,8 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/home/matheau/air_scan
+# Master kill switch — blocks start while the air_scan disable flag is set
+ExecCondition=/home/matheau/air_scan/scanners/air_scan_ctl.sh check
 ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/mobile_status.py --port 8080
 Restart=on-failure
 RestartSec=5

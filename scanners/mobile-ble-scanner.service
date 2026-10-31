@@ -8,6 +8,9 @@ User=root
 WorkingDirectory=/home/matheau/air_scan
 Environment=PYTHONUNBUFFERED=1
 
+# Master kill switch — blocks start while the air_scan disable flag is set
+ExecCondition=/home/matheau/air_scan/scanners/air_scan_ctl.sh check
+
 ExecStartPre=/usr/sbin/rfkill unblock bluetooth
 ExecStart=/usr/bin/python3 /home/matheau/air_scan/scanners/mobile_ble_scanner.py
 

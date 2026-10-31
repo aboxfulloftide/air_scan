@@ -11,6 +11,9 @@ WorkingDirectory=/home/matheau/air_scan
 # Block start if ethernet is connected
 ExecCondition=/usr/local/bin/check-no-ethernet.sh
 
+# Master kill switch — blocks start while the air_scan disable flag is set
+ExecCondition=/home/matheau/air_scan/scanners/air_scan_ctl.sh check
+
 # Put wlan1 into monitor mode before starting
 ExecStartPre=/sbin/ip link set wlan1 down
 ExecStartPre=/sbin/iw dev wlan1 set type monitor
